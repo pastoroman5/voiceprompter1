@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:keepScreenOn="true">
+
+    <ScrollView
+        android:id="@+id/scroll"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="64dp"
+        android:fillViewport="true">
+
+        <TextView
+            android:id="@+id/promptText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="24dp"
+            android:paddingBottom="400dp"
+            android:lineSpacingMultiplier="1.35"
+            android:textSize="34sp"
+            android:textColor="#FFFFFF" />
+    </ScrollView>
+
+    <HorizontalScrollView
+        android:layout_width="match_parent"
+        android:layout_height="64dp"
+        android:background="#CC111111"
+        android:scrollbars="none">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingLeft="8dp"
+            android:paddingRight="8dp">
+
+            <TextView
+                android:id="@+id/micDot"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:text="●"
+                android:textSize="26sp"
+                android:textColor="#FF9600" />
+
+            <Button android:id="@+id/btnPlay" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:minWidth="56dp" android:text="▶" />
+            <Button android:id="@+id/btnRestart" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:minWidth="56dp" android:text="⟲" />
+            <Button android:id="@+id/btnEdit" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:minWidth="56dp" android:text="✎" />
+            <Button android:id="@+id/btnMinus" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:minWidth="56dp" android:text="A−" />
+            <Button android:id="@+id/btnPlus" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:minWidth="56dp" android:text="A+" />
+            <Button android:id="@+id/btnColor" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Цвет" />
+            <Button android:id="@+id/btnMirror" android:layout_width="wrap_content"
+                android:layout_height="wrap_content" android:text="Зерк" />
+
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:padding="8dp"
+                android:textSize="12sp"
+                android:textColor="#AAAAAA" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+    <TextView
+        android:id="@+id/countdown"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:textSize="110sp"
+        android:textColor="#FFFFFF"
+        android:visibility="gone" />
+</FrameLayout>
