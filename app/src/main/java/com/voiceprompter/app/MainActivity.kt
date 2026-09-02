@@ -17,7 +17,9 @@ import android.text.Spannable
 import android.text.SpannableString
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
+import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
@@ -113,6 +115,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private fun stopSmoothScroll() {
         handler.removeCallbacks(scrollStep)
         scrollAnimRunning = false
+        handler.removeCallbacks(settleCheck)
     }
 
     // Шаг B1: резервная автопрокрутка — лента едет с постоянной скоростью,
@@ -154,6 +157,52 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         handler.removeCallbacks(autoStep)
         btnPlay.text = "▶"
         btnPlay.background = btnBg(false)
+    }
+
+    // Шаг B2: жесты. Тап по тексту — пауза/старт. Свайп — ручная перемотка:
+    // после остановки ленты курсор «подхватывает» новое место (в режиме ГОЛОС
+    // чтение продолжается оттуда, в режиме АВТО прокрутка едет дальше оттуда).
+    private var userTouching = false
+    private var userDragged = false
+    private var downX = 0f
+    private var downY = 0f
+    private var settleLastY = -1
+    // После свайпа лента может ещё лететь по инерции — ждём, пока она
+    // остановится (позиция не меняется), и только потом подхватываем место
+    private val settleCheck = object : Runnable {
+        override fun run() {
+            if (userTouching) return
+            val y = scrollView.scrollY
+            if (y == settleLastY) {
+                if (autoRunning) {
+                    autoPosF = y.toFloat()
+                    handler.post(autoStep)
+                } else {
+                    syncIndexToScroll()
+                }
+            } else {
+                settleLastY = y
+                handler.postDelayed(this, 60)
+            }
+        }
+    }
+
+    // Шаг B2: курсор подхватывает место, куда пользователь перемотал ленту.
+    // Активной становится строка, стоящая ТРЕТЬЕЙ сверху (как при чтении)
+    private fun syncIndexToScroll() {
+        val layout = textView.layout ?: return
+        if (wordsNorm.isEmpty()) return
+        val y = max(0, scrollView.scrollY - textView.paddingTop + 2 * textView.lineHeight)
+        val line = layout.getLineForVertical(y)
+        val off = layout.getLineStart(line)
+        var idx = wordsNorm.size
+        for (i in wordStarts.indices) {
+            if (wordStarts[i] >= off) { idx = i; break }
+        }
+        currentIndex = idx
+        missCount = 0; recent.clear()
+        confirmNeeded = false; pendingIndex = -1; pendingCount = 0
+        render()
     }
 
     private val demoText = "Добро пожаловать в ВойсПромптер — суфлёр, который слушает ваш голос.\n\nЧитайте этот текст вслух в обычном темпе. Строка сама поедет за вами. Если вы замолчите, суфлёр остановится и будет ждать вас на том же месте.\n\nПопробуйте сказать что-нибудь постороннее — текст останется на месте, потому что суфлёр следит именно за словами сценария.\n\nА это последний абзац для проверки перескока. Прочитайте несколько слов отсюда, и суфлёр найдёт это место сам."
@@ -262,6 +311,49 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         btnAuto.setOnLongClickListener { autoSpeedDialog(); true }
         btnFontMinus.setOnClickListener { changeFont(-2f) }
         btnFontPlus.setOnClickListener { changeFont(2f) }
+
+        // Шаг B2: жесты на ленте текста.
+        // Тап (палец не сдвинулся) — пауза/старт, как кнопка ▶.
+        // Свайп — обычная ручная прокрутка ScrollView; когда лента остановится,
+        // settleCheck подхватит новое место
+        val touchSlop = ViewConfiguration.get(this).scaledTouchSlop
+        scrollView.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    userTouching = true
+                    userDragged = false
+                    downX = ev.x
+                    downY = ev.y
+                    // Останавливаем анимации, чтобы лента не вырывалась из-под пальца
+                    handler.removeCallbacks(scrollStep)
+                    scrollAnimRunning = false
+                    handler.removeCallbacks(settleCheck)
+                    if (autoRunning) handler.removeCallbacks(autoStep)
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(ev.x - downX) > touchSlop || abs(ev.y - downY) > touchSlop)
+                        userDragged = true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    userTouching = false
+                    if (!userDragged && ev.actionMasked == MotionEvent.ACTION_UP) {
+                        // Тап — пауза/старт (во время отсчёта 3-2-1 игнорируем)
+                        if (countdownView.visibility != View.VISIBLE) togglePlay()
+                        // Если после тапа автопрокрутка всё ещё должна идти —
+                        // продолжаем её (страховка)
+                        if (autoRunning) {
+                            autoPosF = scrollView.scrollY.toFloat()
+                            handler.post(autoStep)
+                        }
+                    } else {
+                        // Был свайп — ждём остановки ленты и подхватываем место
+                        settleLastY = -1
+                        handler.postDelayed(settleCheck, 60)
+                    }
+                }
+            }
+            false
+        }
 
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         am.registerAudioDeviceCallback(object : AudioDeviceCallback() {
@@ -555,6 +647,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     // Активная строка — ТРЕТЬЯ сверху: над ней две затемнённые строки.
     // Лента подъезжает к цели ПЛАВНО (см. scrollStep), без прыжков
     private fun autoScroll() {
+        if (userTouching) return // Шаг B2: пока палец на экране — не анимируем
         val layout = textView.layout ?: return
         val charPos = if (currentIndex < wordStarts.size) wordStarts[currentIndex] else rawText.length
         val line = layout.getLineForOffset(charPos)
