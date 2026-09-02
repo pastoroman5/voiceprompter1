@@ -294,10 +294,81 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             if (i == currentScript) "▶ $n" else "   $n"
         }.toTypedArray()
         AlertDialog.Builder(this)
-            .setTitle("Сценарии")
+            .setTitle("Сценарии (долгое нажатие — изменить)")
             .setItems(items) { _, which -> switchScript(which) }
             .setPositiveButton("+ Новый") { _, _ -> newScriptDialog() }
             .setNegativeButton("Закрыть", null)
+            .show()
+            .listView?.setOnItemLongClickListener { _, _, pos, _ ->
+                scriptActionsDialog(pos)
+                true
+            }
+    }
+
+    // Шаг A2: долгое нажатие на сценарий в списке — переименовать или удалить
+    private fun scriptActionsDialog(i: Int) {
+        AlertDialog.Builder(this)
+            .setTitle(scriptNames[i])
+            .setItems(arrayOf("Переименовать", "Удалить")) { _, which ->
+                if (which == 0) renameScriptDialog(i) else deleteScriptDialog(i)
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
+    }
+
+    private fun renameScriptDialog(i: Int) {
+        val d = resources.displayMetrics.density
+        val wrap = FrameLayout(this)
+        val p = (16 * d).toInt()
+        wrap.setPadding(p, p, p, 0)
+        val et = EditText(this)
+        et.hint = "Название сценария"
+        et.setText(scriptNames[i])
+        et.setSelection(et.text.length)
+        wrap.addView(et)
+        AlertDialog.Builder(this)
+            .setTitle("Переименовать")
+            .setView(wrap)
+            .setPositiveButton("Сохранить") { _, _ ->
+                val name = et.text.toString().trim()
+                if (name.isNotEmpty()) {
+                    scriptNames[i] = name
+                    saveScripts()
+                    toast("Переименовано: $name")
+                }
+                showLibrary()
+            }
+            .setNegativeButton("Отмена") { _, _ -> showLibrary() }
+            .show()
+    }
+
+    private fun deleteScriptDialog(i: Int) {
+        if (scriptNames.size <= 1) {
+            toast("Нельзя удалить последний сценарий")
+            showLibrary()
+            return
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Удалить сценарий?")
+            .setMessage("«" + scriptNames[i] + "» будет удалён безвозвратно.")
+            .setPositiveButton("Удалить") { _, _ ->
+                scriptNames.removeAt(i)
+                scriptTexts.removeAt(i)
+                // Поправляем номер текущего сценария после удаления
+                if (i == currentScript) {
+                    currentScript = min(i, scriptNames.size - 1)
+                    setScriptText(scriptTexts[currentScript])
+                    stopSmoothScroll()
+                    targetScrollY = 0
+                    scrollView.scrollTo(0, 0)
+                } else if (i < currentScript) {
+                    currentScript--
+                }
+                saveScripts()
+                toast("Сценарий удалён")
+                showLibrary()
+            }
+            .setNegativeButton("Отмена") { _, _ -> showLibrary() }
             .show()
     }
 
