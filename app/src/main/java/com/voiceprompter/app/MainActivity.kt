@@ -77,6 +77,31 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private val handler = Handler(Looper.getMainLooper())
 
+    // Плавная прокрутка: лента каждый кадр подъезжает к цели на часть
+    // оставшегося расстояния — без прыжков со строчки на строчку.
+    // Чем больше отставание (быстрое чтение), тем быстрее едет.
+    private var targetScrollY = 0
+    private var scrollAnimRunning = false
+    private val scrollStep = object : Runnable {
+        override fun run() {
+            val cur = scrollView.scrollY
+            val diff = targetScrollY - cur
+            if (abs(diff) <= 1) {
+                scrollView.scrollTo(0, targetScrollY)
+                scrollAnimRunning = false
+                return
+            }
+            val step = max(1, (abs(diff) * 0.10f).toInt())
+            scrollView.scrollTo(0, cur + if (diff > 0) step else -step)
+            handler.postDelayed(this, 16)
+        }
+    }
+
+    private fun stopSmoothScroll() {
+        handler.removeCallbacks(scrollStep)
+        scrollAnimRunning = false
+    }
+
     private val demoText = "Добро пожаловать в ВойсПромптер — суфлёр, который слушает ваш голос.\n\nЧитайте этот текст вслух в обычном темпе. Строка сама поедет за вами. Если вы замолчите, суфлёр остановится и будет ждать вас на том же месте.\n\nПопробуйте сказать что-нибудь постороннее — текст останется на месте, потому что суфлёр следит именно за словами сценария.\n\nА это последний абзац для проверки перескока. Прочитайте несколько слов отсюда, и суфлёр найдёт это место сам."
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -247,13 +272,17 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         textView.post { autoScroll() }
     }
 
-    // Активная строка — ТРЕТЬЯ сверху: над ней две затемнённые строки
+    // Активная строка — ТРЕТЬЯ сверху: над ней две затемнённые строки.
+    // Лента подъезжает к цели ПЛАВНО (см. scrollStep), без прыжков
     private fun autoScroll() {
         val layout = textView.layout ?: return
         val charPos = if (currentIndex < wordStarts.size) wordStarts[currentIndex] else rawText.length
         val line = layout.getLineForOffset(charPos)
-        val target = max(0, layout.getLineTop(line) + textView.paddingTop - 2 * textView.lineHeight)
-        scrollView.smoothScrollTo(0, target)
+        targetScrollY = max(0, layout.getLineTop(line) + textView.paddingTop - 2 * textView.lineHeight)
+        if (!scrollAnimRunning) {
+            scrollAnimRunning = true
+            handler.post(scrollStep)
+        }
     }
 
     // ---------- Следование за голосом ----------
@@ -400,6 +429,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private fun restart() {
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
         confirmNeeded = false; pendingIndex = -1; pendingCount = 0
+        stopSmoothScroll()
+        targetScrollY = 0
         render()
         scrollView.smoothScrollTo(0, 0)
     }
@@ -470,6 +501,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             .setPositiveButton("Сохранить") { _, _ ->
                 setScriptText(et.text.toString())
                 prefs.edit().putString("text", rawText).apply()
+                stopSmoothScroll()
+                targetScrollY = 0
                 scrollView.smoothScrollTo(0, 0)
             }
             .setNegativeButton("Отмена", null)
@@ -527,5 +560,6 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     override fun onDestroy() {
         super.onDestroy()
         stopListening()
+        stopSmoothScroll()
     }
 }
