@@ -26,6 +26,7 @@ import android.widget.FrameLayout
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -53,6 +54,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private lateinit var micDot: TextView
     private lateinit var btnPlay: TextView
     private lateinit var btnJump: TextView
+    private lateinit var btnAuto: TextView
 
     private var model: Model? = null
     private var modelReady = false
@@ -113,6 +115,47 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         scrollAnimRunning = false
     }
 
+    // Шаг B1: резервная автопрокрутка — лента едет с постоянной скоростью,
+    // микрофон не используется. Страховка на случай шумной площадки.
+    // autoSpeed — скорость в dp/сек (долгое нажатие на АВТО — ползунок)
+    private var autoMode = false
+    private var autoSpeed = 30
+    private var autoRunning = false
+    private var autoPosF = 0f
+    private val autoStep = object : Runnable {
+        override fun run() {
+            if (!autoRunning) return
+            val d = resources.displayMetrics.density
+            autoPosF += autoSpeed * d * 0.016f
+            val maxY = max(0, textView.height - scrollView.height)
+            if (autoPosF >= maxY) {
+                scrollView.scrollTo(0, maxY)
+                stopAuto()
+                toast("Конец текста")
+                return
+            }
+            scrollView.scrollTo(0, autoPosF.toInt())
+            handler.postDelayed(this, 16)
+        }
+    }
+
+    private fun startAuto() {
+        stopSmoothScroll()
+        autoPosF = scrollView.scrollY.toFloat()
+        autoRunning = true
+        btnPlay.text = "⏸"
+        btnPlay.background = btnBg(true)
+        handler.post(autoStep)
+    }
+
+    private fun stopAuto() {
+        if (!autoRunning) return
+        autoRunning = false
+        handler.removeCallbacks(autoStep)
+        btnPlay.text = "▶"
+        btnPlay.background = btnBg(false)
+    }
+
     private val demoText = "Добро пожаловать в ВойсПромптер — суфлёр, который слушает ваш голос.\n\nЧитайте этот текст вслух в обычном темпе. Строка сама поедет за вами. Если вы замолчите, суфлёр остановится и будет ждать вас на том же месте.\n\nПопробуйте сказать что-нибудь постороннее — текст останется на месте, потому что суфлёр следит именно за словами сценария.\n\nА это последний абзац для проверки перескока. Прочитайте несколько слов отсюда, и суфлёр найдёт это место сам."
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -123,6 +166,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         fontSize = prefs.getFloat("font", 34f)
         activeColor = prefs.getInt("color", Color.WHITE)
         mirror = prefs.getBoolean("mirror", false)
+        autoMode = prefs.getBoolean("autoMode", false)
+        autoSpeed = prefs.getInt("autoSpeed", 30)
         loadScripts()
         rawText = scriptTexts[currentScript]
 
@@ -153,13 +198,14 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         btnPlay = makeBtn("▶")
         val btnRestart = makeBtn("⟲")
         btnJump = makeBtn("")
+        btnAuto = makeBtn("АВТО")
         val btnFontMinus = makeBtn("A−")
         val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
         val btnLibrary = makeBtn("📚")
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
-        bar.addView(btnJump); bar.addView(btnFontMinus); bar.addView(btnFontPlus)
+        bar.addView(btnJump); bar.addView(btnAuto); bar.addView(btnFontMinus); bar.addView(btnFontPlus)
         bar.addView(btnEdit); bar.addView(btnLibrary); bar.addView(btnSettings)
 
         val barScroll = HorizontalScrollView(this)
@@ -184,6 +230,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         applyMirror()
         setScriptText(rawText)
         updateJumpBtn()
+        updateAutoBtn()
         updateMicDot()
 
         btnPlay.setOnClickListener { togglePlay() }
@@ -201,6 +248,18 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             else
                 "Перескоки ВЫКЛЮЧЕНЫ: суфлёр идёт строго по порядку")
         }
+        btnAuto.setOnClickListener {
+            if (isPlaying) stopListening()
+            stopAuto()
+            autoMode = !autoMode
+            prefs.edit().putBoolean("autoMode", autoMode).apply()
+            updateAutoBtn()
+            toast(if (autoMode)
+                "Режим АВТО: прокрутка с постоянной скоростью, микрофон не используется. Долгое нажатие на АВТО — скорость."
+            else
+                "Режим ГОЛОС: суфлёр следует за вашим чтением")
+        }
+        btnAuto.setOnLongClickListener { autoSpeedDialog(); true }
         btnFontMinus.setOnClickListener { changeFont(-2f) }
         btnFontPlus.setOnClickListener { changeFont(2f) }
 
@@ -253,6 +312,44 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         btnJump.text = if (jumpEnabled) "🔀вкл" else "🔀выкл"
         btnJump.setTextColor(if (jumpEnabled) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
         btnJump.background = btnBg(jumpEnabled)
+    }
+
+    // Шаг B1: индикация режима АВТО на кнопке
+    private fun updateAutoBtn() {
+        btnAuto.setTextColor(if (autoMode) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
+        btnAuto.background = btnBg(autoMode)
+    }
+
+    // Шаг B1: ползунок скорости автопрокрутки (5..120 dp/сек).
+    // Скорость можно менять прямо во время прокрутки — лента отреагирует сразу
+    private fun autoSpeedDialog() {
+        val d = resources.displayMetrics.density
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
+        val p = (20 * d).toInt()
+        box.setPadding(p, p, p, p)
+        val label = TextView(this)
+        label.text = "Скорость: $autoSpeed"
+        label.textSize = 18f
+        val sb = SeekBar(this)
+        sb.max = 115
+        sb.progress = autoSpeed - 5
+        sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                autoSpeed = v + 5
+                label.text = "Скорость: $autoSpeed"
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(label); box.addView(sb)
+        AlertDialog.Builder(this)
+            .setTitle("Скорость автопрокрутки")
+            .setView(box)
+            .setPositiveButton("Готово") { _, _ ->
+                prefs.edit().putInt("autoSpeed", autoSpeed).apply()
+            }
+            .show()
     }
 
     // ---------- Библиотека сценариев ----------
@@ -364,6 +461,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                     currentScript = min(i, scriptNames.size - 1)
                     setScriptText(scriptTexts[currentScript])
                     stopSmoothScroll()
+                    stopAuto()
                     targetScrollY = 0
                     scrollView.scrollTo(0, 0)
                 } else if (i < currentScript) {
@@ -385,6 +483,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         setScriptText(scriptTexts[i])
         saveScripts()
         stopSmoothScroll()
+        stopAuto()
         targetScrollY = 0
         scrollView.smoothScrollTo(0, 0)
         toast("Сценарий: " + scriptNames[i])
@@ -412,6 +511,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 setScriptText("")
                 saveScripts()
                 stopSmoothScroll()
+                stopAuto()
                 targetScrollY = 0
                 scrollView.scrollTo(0, 0)
                 // Сразу открываем редактор, чтобы ввести текст нового сценария
@@ -560,6 +660,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private fun togglePlay() {
         if (isPlaying) { stopListening(); return }
+        // Шаг B1: в режиме АВТО кнопка ▶ управляет автопрокруткой, микрофон не нужен
+        if (autoRunning) { stopAuto(); return }
+        if (autoMode) { startCountdown(); return }
         if (!modelReady) { toast("Модель ещё загружается, подождите пару секунд…"); return }
         startCountdown()
     }
@@ -576,7 +679,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                     handler.postDelayed(this, 1000)
                 } else {
                     countdownView.visibility = View.GONE
-                    startListening()
+                    if (autoMode) startAuto() else startListening()
                 }
             }
         }
@@ -610,6 +713,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
         confirmNeeded = false; pendingIndex = -1; pendingCount = 0
         stopSmoothScroll()
+        stopAuto()
         targetScrollY = 0
         render()
         scrollView.smoothScrollTo(0, 0)
@@ -717,6 +821,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 scriptTexts[currentScript] = rawText
                 saveScripts()
                 stopSmoothScroll()
+                stopAuto()
                 targetScrollY = 0
                 scrollView.smoothScrollTo(0, 0)
             }
@@ -796,6 +901,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         super.onDestroy()
         stopListening()
         stopSmoothScroll()
+        stopAuto()
     }
 
     companion object {
