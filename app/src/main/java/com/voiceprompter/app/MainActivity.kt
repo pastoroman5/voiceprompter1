@@ -281,11 +281,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 return
             }
             // Цепочка оборвалась — пробуем начать новую с этого слова.
-            // Ищем сначала ВПЕРЁД (обычное продолжение), а потом НАЗАД —
-            // чтобы можно было вернуться к началу фразы и продолжить оттуда
+            // Ищем ВПЕРЁД до 15 слов (пока подтверждение срывалось, чтец мог
+            // уйти вперёд от маркера) и НАЗАД до 15 слов — чтобы можно было
+            // вернуться к началу фразы и продолжить оттуда
             pendingIndex = -1; pendingCount = 0
             var found = -1
-            val fwdEnd = min(currentIndex + 3, wordsNorm.size)
+            val fwdEnd = min(currentIndex + 15, wordsNorm.size)
             for (j in currentIndex until fwdEnd) {
                 if (wordMatch(wordsNorm[j], w)) { found = j; break }
             }
