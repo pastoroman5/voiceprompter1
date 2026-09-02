@@ -186,15 +186,15 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         val d = resources.displayMetrics.density
         val t = TextView(this)
         t.text = label
-        t.textSize = 26f
+        t.textSize = 22f
         t.setTextColor(Color.parseColor("#EEEEEE"))
         t.gravity = Gravity.CENTER
         t.background = btnBg(false)
-        t.minWidth = (56 * d).toInt()
-        t.setPadding((10 * d).toInt(), 0, (10 * d).toInt(), 0)
+        t.minWidth = (46 * d).toInt()
+        t.setPadding((8 * d).toInt(), 0, (8 * d).toInt(), 0)
         val lp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT, (56 * d).toInt())
-        lp.setMargins((5 * d).toInt(), (8 * d).toInt(), (5 * d).toInt(), (8 * d).toInt())
+            LinearLayout.LayoutParams.WRAP_CONTENT, (46 * d).toInt())
+        lp.setMargins((4 * d).toInt(), (6 * d).toInt(), (4 * d).toInt(), (6 * d).toInt())
         t.layoutParams = lp
         return t
     }
@@ -259,7 +259,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         if (wordsNorm.isEmpty()) return
         recent.add(w)
         if (recent.size > 4) recent.removeAt(0)
-        val end = min(currentIndex + 8, wordsNorm.size)
+        val end = min(currentIndex + 3, wordsNorm.size)
         for (j in currentIndex until end) {
             if (wordMatch(wordsNorm[j], w)) {
                 currentIndex = j + 1; missCount = 0; render(); return
@@ -355,9 +355,14 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         if (h.isNullOrEmpty()) return
         val s = try { JSONObject(h).optString(key, "") } catch (e: Exception) { "" }
         val toks = s.trim().split(Regex("\\s+")).map { norm(it) }.filter { it.isNotEmpty() }
-        var from = partialProcessed
-        if (from > toks.size) from = 0
-        for (i in from until toks.size) onWord(toks[i])
+        // Если распознаватель пересмотрел фразу и слов стало меньше —
+        // уже обработанные слова НЕ подаём заново (раньше это вызывало
+        // скачки на повторяющиеся слова)
+        if (partialProcessed > toks.size) {
+            partialProcessed = if (final) 0 else toks.size
+            return
+        }
+        for (i in partialProcessed until toks.size) onWord(toks[i])
         partialProcessed = if (final) 0 else toks.size
     }
 
