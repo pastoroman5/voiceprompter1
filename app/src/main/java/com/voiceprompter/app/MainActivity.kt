@@ -30,6 +30,7 @@ import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -75,6 +76,11 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private var pendingIndex = -1
     private var pendingCount = 0
 
+    // Библиотека сценариев (шаг A1): список хранится в prefs как JSON
+    private val scriptNames = ArrayList<String>()
+    private val scriptTexts = ArrayList<String>()
+    private var currentScript = 0
+
     private val handler = Handler(Looper.getMainLooper())
 
     // Плавная прокрутка: лента каждый кадр подъезжает к цели на часть
@@ -112,7 +118,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         fontSize = prefs.getFloat("font", 34f)
         activeColor = prefs.getInt("color", Color.WHITE)
         mirror = prefs.getBoolean("mirror", false)
-        rawText = prefs.getString("text", demoText) ?: demoText
+        loadScripts()
+        rawText = scriptTexts[currentScript]
 
         val d = resources.displayMetrics.density
         val root = FrameLayout(this)
@@ -144,10 +151,11 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         val btnFontMinus = makeBtn("A−")
         val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
+        val btnLibrary = makeBtn("📚")
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
         bar.addView(btnJump); bar.addView(btnFontMinus); bar.addView(btnFontPlus)
-        bar.addView(btnEdit); bar.addView(btnSettings)
+        bar.addView(btnEdit); bar.addView(btnLibrary); bar.addView(btnSettings)
 
         val barScroll = HorizontalScrollView(this)
         barScroll.isHorizontalScrollBarEnabled = false
@@ -176,6 +184,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         btnPlay.setOnClickListener { togglePlay() }
         btnRestart.setOnClickListener { restart() }
         btnEdit.setOnClickListener { showEditor() }
+        btnLibrary.setOnClickListener { showLibrary() }
         btnSettings.setOnClickListener { showSettings() }
         micDot.setOnClickListener { toast(micInfo()) }
         btnJump.setOnClickListener {
@@ -239,6 +248,101 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         btnJump.text = if (jumpEnabled) "🔀вкл" else "🔀выкл"
         btnJump.setTextColor(if (jumpEnabled) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
         btnJump.background = btnBg(jumpEnabled)
+    }
+
+    // ---------- Библиотека сценариев ----------
+
+    // Загрузка списка сценариев из prefs. Если списка ещё нет (старая версия
+    // приложения), единственный сохранённый текст переносится в "Сценарий 1"
+    private fun loadScripts() {
+        scriptNames.clear(); scriptTexts.clear()
+        val json = prefs.getString("scripts", null)
+        if (json != null) {
+            try {
+                val arr = JSONArray(json)
+                for (i in 0 until arr.length()) {
+                    val o = arr.getJSONObject(i)
+                    scriptNames.add(o.optString("name", "Сценарий " + (i + 1)))
+                    scriptTexts.add(o.optString("text", ""))
+                }
+            } catch (e: Exception) { }
+        }
+        if (scriptNames.isEmpty()) {
+            // Миграция: старый одиночный текст становится первым сценарием
+            scriptNames.add("Сценарий 1")
+            scriptTexts.add(prefs.getString("text", demoText) ?: demoText)
+        }
+        currentScript = prefs.getInt("curScript", 0)
+        if (currentScript < 0 || currentScript >= scriptNames.size) currentScript = 0
+        saveScripts()
+    }
+
+    private fun saveScripts() {
+        val arr = JSONArray()
+        for (i in scriptNames.indices) {
+            val o = JSONObject()
+            o.put("name", scriptNames[i])
+            o.put("text", scriptTexts[i])
+            arr.put(o)
+        }
+        prefs.edit().putString("scripts", arr.toString())
+            .putInt("curScript", currentScript).apply()
+    }
+
+    private fun showLibrary() {
+        val items = scriptNames.mapIndexed { i, n ->
+            if (i == currentScript) "▶ $n" else "   $n"
+        }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("Сценарии")
+            .setItems(items) { _, which -> switchScript(which) }
+            .setPositiveButton("+ Новый") { _, _ -> newScriptDialog() }
+            .setNegativeButton("Закрыть", null)
+            .show()
+    }
+
+    private fun switchScript(i: Int) {
+        if (i == currentScript) return
+        // Текущий текст уже сохранён (сохраняется при каждом редактировании),
+        // просто переключаемся
+        currentScript = i
+        setScriptText(scriptTexts[i])
+        saveScripts()
+        stopSmoothScroll()
+        targetScrollY = 0
+        scrollView.smoothScrollTo(0, 0)
+        toast("Сценарий: " + scriptNames[i])
+    }
+
+    private fun newScriptDialog() {
+        val d = resources.displayMetrics.density
+        val wrap = FrameLayout(this)
+        val p = (16 * d).toInt()
+        wrap.setPadding(p, p, p, 0)
+        val et = EditText(this)
+        et.hint = "Название сценария"
+        et.setText("Сценарий " + (scriptNames.size + 1))
+        et.setSelection(et.text.length)
+        wrap.addView(et)
+        AlertDialog.Builder(this)
+            .setTitle("Новый сценарий")
+            .setView(wrap)
+            .setPositiveButton("Создать") { _, _ ->
+                var name = et.text.toString().trim()
+                if (name.isEmpty()) name = "Сценарий " + (scriptNames.size + 1)
+                scriptNames.add(name)
+                scriptTexts.add("")
+                currentScript = scriptNames.size - 1
+                setScriptText("")
+                saveScripts()
+                stopSmoothScroll()
+                targetScrollY = 0
+                scrollView.scrollTo(0, 0)
+                // Сразу открываем редактор, чтобы ввести текст нового сценария
+                showEditor()
+            }
+            .setNegativeButton("Отмена", null)
+            .show()
     }
 
     // ---------- Текст ----------
@@ -496,11 +600,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         et.gravity = Gravity.TOP
         wrap.addView(et)
         AlertDialog.Builder(this)
-            .setTitle("Текст сценария")
+            .setTitle("Текст сценария: " + scriptNames[currentScript])
             .setView(wrap)
             .setPositiveButton("Сохранить") { _, _ ->
                 setScriptText(et.text.toString())
-                prefs.edit().putString("text", rawText).apply()
+                scriptTexts[currentScript] = rawText
+                saveScripts()
                 stopSmoothScroll()
                 targetScrollY = 0
                 scrollView.smoothScrollTo(0, 0)
