@@ -1,7 +1,9 @@
 package com.voiceprompter.app
 
 import android.Manifest
+import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
@@ -80,6 +82,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private val scriptNames = ArrayList<String>()
     private val scriptTexts = ArrayList<String>()
     private var currentScript = 0
+
+    // Шаг A3: ссылка на поле редактора, чтобы импорт .txt мог вставить в него текст
+    private var editorEt: EditText? = null
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -662,17 +667,51 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private fun showEditor() {
         val d = resources.displayMetrics.density
-        val wrap = FrameLayout(this)
+        val box = LinearLayout(this)
+        box.orientation = LinearLayout.VERTICAL
         val p = (16 * d).toInt()
-        wrap.setPadding(p, p, p, 0)
+        box.setPadding(p, p, p, 0)
+
+        // Шаг A3: кнопки быстрого наполнения — вставка из буфера и импорт .txt
+        val row = LinearLayout(this)
+        row.orientation = LinearLayout.HORIZONTAL
+        val bPaste = Button(this)
+        bPaste.text = "📋 Из буфера"
+        val bImport = Button(this)
+        bImport.text = "📂 Импорт .txt"
+        row.addView(bPaste); row.addView(bImport)
+
         val et = EditText(this)
         et.setText(rawText)
         et.minLines = 8
         et.gravity = Gravity.TOP
-        wrap.addView(et)
+        editorEt = et
+        box.addView(row)
+        box.addView(et)
+
+        bPaste.setOnClickListener {
+            val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            val clip = cm.primaryClip
+            val t = if (clip != null && clip.itemCount > 0)
+                clip.getItemAt(0).coerceToText(this).toString() else ""
+            if (t.isEmpty()) { toast("Буфер обмена пуст"); return@setOnClickListener }
+            // Вставляем в позицию курсора (или вместо выделенного фрагмента)
+            val a = max(0, min(et.selectionStart, et.selectionEnd))
+            val b = max(0, max(et.selectionStart, et.selectionEnd))
+            et.text.replace(a, b, t)
+            toast("Вставлено из буфера")
+        }
+        bImport.setOnClickListener {
+            val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+            intent.type = "text/*"
+            try { startActivityForResult(intent, REQ_IMPORT_TXT) }
+            catch (e: Exception) { toast("Не удалось открыть выбор файла") }
+        }
+
         AlertDialog.Builder(this)
             .setTitle("Текст сценария: " + scriptNames[currentScript])
-            .setView(wrap)
+            .setView(box)
             .setPositiveButton("Сохранить") { _, _ ->
                 setScriptText(et.text.toString())
                 scriptTexts[currentScript] = rawText
@@ -683,6 +722,26 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
             .setNegativeButton("Отмена", null)
             .show()
+    }
+
+    // Шаг A3: результат выбора .txt-файла — читаем его и кладём в поле редактора
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQ_IMPORT_TXT && resultCode == RESULT_OK) {
+            val uri = data?.data ?: return
+            try {
+                val text = contentResolver.openInputStream(uri)
+                    ?.bufferedReader(Charsets.UTF_8)?.use { it.readText() } ?: ""
+                if (text.isEmpty()) { toast("Файл пуст"); return }
+                val et = editorEt
+                if (et != null) {
+                    et.setText(text)
+                    toast("Текст загружен из файла — нажмите «Сохранить»")
+                }
+            } catch (e: Exception) {
+                toast("Ошибка чтения файла: " + e.message)
+            }
+        }
     }
 
     private fun showSettings() {
@@ -737,5 +796,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         super.onDestroy()
         stopListening()
         stopSmoothScroll()
+    }
+
+    companion object {
+        private const val REQ_IMPORT_TXT = 42
     }
 }
