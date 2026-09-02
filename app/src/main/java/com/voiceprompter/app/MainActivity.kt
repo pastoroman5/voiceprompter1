@@ -69,6 +69,10 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private var missCount = 0
     private val recent = ArrayList<String>()
     private var partialProcessed = 0
+    // Защита от ложного старта: после посторонних слов суфлёр не двигается,
+    // пока не услышит ДВА слова текста подряд
+    private var confirmNeeded = false
+    private var pendingIndex = -1
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -186,15 +190,15 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         val d = resources.displayMetrics.density
         val t = TextView(this)
         t.text = label
-        t.textSize = 22f
+        t.textSize = 19f
         t.setTextColor(Color.parseColor("#EEEEEE"))
         t.gravity = Gravity.CENTER
         t.background = btnBg(false)
-        t.minWidth = (46 * d).toInt()
-        t.setPadding((8 * d).toInt(), 0, (8 * d).toInt(), 0)
+        t.minWidth = (40 * d).toInt()
+        t.setPadding((6 * d).toInt(), 0, (6 * d).toInt(), 0)
         val lp = LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.WRAP_CONTENT, (46 * d).toInt())
-        lp.setMargins((4 * d).toInt(), (6 * d).toInt(), (4 * d).toInt(), (6 * d).toInt())
+            LinearLayout.LayoutParams.WRAP_CONTENT, (40 * d).toInt())
+        lp.setMargins((3 * d).toInt(), (5 * d).toInt(), (3 * d).toInt(), (5 * d).toInt())
         t.layoutParams = lp
         return t
     }
@@ -228,6 +232,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
         }
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
+        confirmNeeded = false; pendingIndex = -1
         render()
     }
 
@@ -259,6 +264,28 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         if (wordsNorm.isEmpty()) return
         recent.add(w)
         if (recent.size > 4) recent.removeAt(0)
+
+        // Режим подтверждения: были посторонние слова, суфлёр стоит на месте
+        // и сдвинется только после ДВУХ слов текста подряд
+        if (confirmNeeded) {
+            if (pendingIndex in 0 until wordsNorm.size && wordMatch(wordsNorm[pendingIndex], w)) {
+                // второе слово подряд совпало — это точно чтение текста
+                currentIndex = pendingIndex + 1
+                confirmNeeded = false; pendingIndex = -1; missCount = 0
+                render(); return
+            }
+            pendingIndex = -1
+            val e = min(currentIndex + 3, wordsNorm.size)
+            for (j in currentIndex until e) {
+                if (wordMatch(wordsNorm[j], w)) { pendingIndex = j + 1; break }
+            }
+            if (pendingIndex < 0) {
+                missCount++
+                if (jumpEnabled && missCount >= 3) tryJump()
+            }
+            return
+        }
+
         val end = min(currentIndex + 3, wordsNorm.size)
         for (j in currentIndex until end) {
             if (wordMatch(wordsNorm[j], w)) {
@@ -266,6 +293,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
         }
         missCount++
+        if (missCount >= 2) { confirmNeeded = true; pendingIndex = -1 }
         if (jumpEnabled && missCount >= 3) tryJump()
     }
 
@@ -284,7 +312,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
             if (positions.isNotEmpty()) {
                 val best = positions.minByOrNull { abs(it - currentIndex) }!!
-                currentIndex = best + len; missCount = 0; render(); return
+                currentIndex = best + len; missCount = 0
+                confirmNeeded = false; pendingIndex = -1
+                render(); return
             }
         }
     }
@@ -347,6 +377,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private fun restart() {
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
+        confirmNeeded = false; pendingIndex = -1
         render()
         scrollView.smoothScrollTo(0, 0)
     }
