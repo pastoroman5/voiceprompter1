@@ -87,6 +87,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private val scriptTexts = ArrayList<String>()
     private var currentScript = 0
 
+    // Шаг B3: позиция чтения каждого сценария (номер слова + прокрутка ленты).
+    // Сохраняется при выходе из приложения и при переключении сценария,
+    // восстанавливается при запуске и при возврате к сценарию
+    private val scriptPos = ArrayList<Int>()
+    private val scriptScroll = ArrayList<Int>()
+
     // Шаг A3: ссылка на поле редактора, чтобы импорт .txt мог вставить в него текст
     private var editorEt: EditText? = null
 
@@ -278,6 +284,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         setContentView(root)
         applyMirror()
         setScriptText(rawText)
+        // Шаг B3: возвращаемся на место, где остановились в прошлый раз
+        restorePosition()
         updateJumpBtn()
         updateAutoBtn()
         updateMicDot()
@@ -366,6 +374,12 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         else ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1)
     }
 
+    // Шаг B3: при сворачивании/закрытии приложения запоминаем позицию чтения
+    override fun onPause() {
+        super.onPause()
+        savePosition()
+    }
+
     // Фон кнопки: квадратик с рамкой; активная — зелёная рамка и тёмно-зелёный фон
     private fun btnBg(active: Boolean): GradientDrawable {
         val d = resources.displayMetrics.density
@@ -450,6 +464,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     // приложения), единственный сохранённый текст переносится в "Сценарий 1"
     private fun loadScripts() {
         scriptNames.clear(); scriptTexts.clear()
+        scriptPos.clear(); scriptScroll.clear()
         val json = prefs.getString("scripts", null)
         if (json != null) {
             try {
@@ -458,6 +473,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                     val o = arr.getJSONObject(i)
                     scriptNames.add(o.optString("name", "Сценарий " + (i + 1)))
                     scriptTexts.add(o.optString("text", ""))
+                    // Шаг B3: сохранённая позиция чтения (у старых записей — 0)
+                    scriptPos.add(o.optInt("pos", 0))
+                    scriptScroll.add(o.optInt("scroll", 0))
                 }
             } catch (e: Exception) { }
         }
@@ -465,6 +483,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             // Миграция: старый одиночный текст становится первым сценарием
             scriptNames.add("Сценарий 1")
             scriptTexts.add(prefs.getString("text", demoText) ?: demoText)
+            scriptPos.add(0)
+            scriptScroll.add(0)
         }
         currentScript = prefs.getInt("curScript", 0)
         if (currentScript < 0 || currentScript >= scriptNames.size) currentScript = 0
@@ -477,10 +497,49 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             val o = JSONObject()
             o.put("name", scriptNames[i])
             o.put("text", scriptTexts[i])
+            o.put("pos", scriptPos.getOrElse(i) { 0 })
+            o.put("scroll", scriptScroll.getOrElse(i) { 0 })
             arr.put(o)
         }
         prefs.edit().putString("scripts", arr.toString())
             .putInt("curScript", currentScript).apply()
+    }
+
+    // Шаг B3: запомнить позицию чтения текущего сценария (слово + прокрутка)
+    private fun savePosition() {
+        if (currentScript in scriptPos.indices) {
+            scriptPos[currentScript] = currentIndex
+            scriptScroll[currentScript] = scrollView.scrollY
+            saveScripts()
+        }
+    }
+
+    // Шаг B3: вернуться на сохранённую позицию текущего сценария.
+    // Сначала восстанавливаем номер слова (затемнение), затем — прокрутку
+    // ленты (когда текст уже разложен по строкам)
+    private fun restorePosition() {
+        val pos = scriptPos.getOrElse(currentScript) { 0 }
+        val scr = scriptScroll.getOrElse(currentScript) { 0 }
+        currentIndex = min(max(0, pos), wordsNorm.size)
+        missCount = 0; recent.clear(); partialProcessed = 0
+        confirmNeeded = false; pendingIndex = -1; pendingCount = 0
+        render()
+        restoreScrollWhenReady(scr, 20)
+    }
+
+    // Прокрутку можно восстановить только после того, как TextView измерен
+    // и разложен по строкам — иначе ScrollView обрежет позицию до нуля.
+    // Поэтому ждём готовности (до 20 попыток по 50 мс)
+    private fun restoreScrollWhenReady(scr: Int, tries: Int) {
+        textView.post {
+            if (textView.layout == null || textView.height == 0) {
+                if (tries > 0) handler.postDelayed({ restoreScrollWhenReady(scr, tries - 1) }, 50)
+                return@post
+            }
+            stopSmoothScroll()
+            targetScrollY = max(0, scr)
+            scrollView.scrollTo(0, max(0, scr))
+        }
     }
 
     private fun showLibrary() {
@@ -548,14 +607,16 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             .setPositiveButton("Удалить") { _, _ ->
                 scriptNames.removeAt(i)
                 scriptTexts.removeAt(i)
+                scriptPos.removeAt(i)
+                scriptScroll.removeAt(i)
                 // Поправляем номер текущего сценария после удаления
                 if (i == currentScript) {
                     currentScript = min(i, scriptNames.size - 1)
                     setScriptText(scriptTexts[currentScript])
                     stopSmoothScroll()
                     stopAuto()
-                    targetScrollY = 0
-                    scrollView.scrollTo(0, 0)
+                    // Шаг B3: соседний сценарий открывается на своём сохранённом месте
+                    restorePosition()
                 } else if (i < currentScript) {
                     currentScript--
                 }
@@ -569,15 +630,15 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private fun switchScript(i: Int) {
         if (i == currentScript) return
-        // Текущий текст уже сохранён (сохраняется при каждом редактировании),
-        // просто переключаемся
+        // Шаг B3: запоминаем место в старом сценарии и возвращаемся на
+        // сохранённое место в новом (раньше лента уходила в начало)
+        savePosition()
         currentScript = i
         setScriptText(scriptTexts[i])
         saveScripts()
         stopSmoothScroll()
         stopAuto()
-        targetScrollY = 0
-        scrollView.smoothScrollTo(0, 0)
+        restorePosition()
         toast("Сценарий: " + scriptNames[i])
     }
 
@@ -595,10 +656,14 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             .setTitle("Новый сценарий")
             .setView(wrap)
             .setPositiveButton("Создать") { _, _ ->
+                // Шаг B3: сначала запоминаем позицию в текущем сценарии
+                savePosition()
                 var name = et.text.toString().trim()
                 if (name.isEmpty()) name = "Сценарий " + (scriptNames.size + 1)
                 scriptNames.add(name)
                 scriptTexts.add("")
+                scriptPos.add(0)
+                scriptScroll.add(0)
                 currentScript = scriptNames.size - 1
                 setScriptText("")
                 saveScripts()
@@ -810,6 +875,9 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         targetScrollY = 0
         render()
         scrollView.smoothScrollTo(0, 0)
+        // Шаг B3: возврат в начало тоже запоминаем — после перезапуска
+        // приложение откроется с начала, как и ожидает пользователь
+        savePosition()
     }
 
     private fun processHyp(h: String?, key: String, final: Boolean) {
@@ -912,6 +980,11 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             .setPositiveButton("Сохранить") { _, _ ->
                 setScriptText(et.text.toString())
                 scriptTexts[currentScript] = rawText
+                // Шаг B3: текст изменился — старая позиция больше не действительна
+                if (currentScript in scriptPos.indices) {
+                    scriptPos[currentScript] = 0
+                    scriptScroll[currentScript] = 0
+                }
                 saveScripts()
                 stopSmoothScroll()
                 stopAuto()
