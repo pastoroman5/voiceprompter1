@@ -70,9 +70,10 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     private val recent = ArrayList<String>()
     private var partialProcessed = 0
     // Защита от ложного старта: после посторонних слов суфлёр не двигается,
-    // пока не услышит ДВА слова текста подряд
+    // пока не услышит ТРИ слова текста подряд
     private var confirmNeeded = false
     private var pendingIndex = -1
+    private var pendingCount = 0
 
     private val handler = Handler(Looper.getMainLooper())
 
@@ -232,7 +233,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
         }
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
-        confirmNeeded = false; pendingIndex = -1
+        confirmNeeded = false; pendingIndex = -1; pendingCount = 0
         render()
     }
 
@@ -266,20 +267,40 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         if (recent.size > 4) recent.removeAt(0)
 
         // Режим подтверждения: были посторонние слова, суфлёр стоит на месте
-        // и сдвинется только после ДВУХ слов текста подряд
+        // и сдвинется только после ТРЁХ слов текста подряд
         if (confirmNeeded) {
             if (pendingIndex in 0 until wordsNorm.size && wordMatch(wordsNorm[pendingIndex], w)) {
-                // второе слово подряд совпало — это точно чтение текста
-                currentIndex = pendingIndex + 1
-                confirmNeeded = false; pendingIndex = -1; missCount = 0
-                render(); return
+                pendingCount++
+                pendingIndex++
+                if (pendingCount >= 3) {
+                    // три слова текста подряд — это точно чтение
+                    currentIndex = pendingIndex
+                    confirmNeeded = false; pendingIndex = -1; pendingCount = 0; missCount = 0
+                    render()
+                }
+                return
             }
-            pendingIndex = -1
-            val e = min(currentIndex + 3, wordsNorm.size)
-            for (j in currentIndex until e) {
-                if (wordMatch(wordsNorm[j], w)) { pendingIndex = j + 1; break }
+            // Цепочка оборвалась — пробуем начать новую с этого слова.
+            // Ищем сначала ВПЕРЁД (обычное продолжение), а потом НАЗАД —
+            // чтобы можно было вернуться к началу фразы и продолжить оттуда
+            pendingIndex = -1; pendingCount = 0
+            var found = -1
+            val fwdEnd = min(currentIndex + 3, wordsNorm.size)
+            for (j in currentIndex until fwdEnd) {
+                if (wordMatch(wordsNorm[j], w)) { found = j; break }
             }
-            if (pendingIndex < 0) {
+            if (found < 0) {
+                val backLimit = max(0, currentIndex - 15)
+                var j = min(currentIndex, wordsNorm.size) - 1
+                while (j >= backLimit) {
+                    if (wordMatch(wordsNorm[j], w)) { found = j; break }
+                    j--
+                }
+            }
+            if (found >= 0) {
+                pendingIndex = found + 1
+                pendingCount = 1
+            } else {
                 missCount++
                 if (jumpEnabled && missCount >= 3) tryJump()
             }
@@ -293,7 +314,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             }
         }
         missCount++
-        if (missCount >= 2) { confirmNeeded = true; pendingIndex = -1 }
+        if (missCount >= 2) { confirmNeeded = true; pendingIndex = -1; pendingCount = 0 }
         if (jumpEnabled && missCount >= 3) tryJump()
     }
 
@@ -313,7 +334,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             if (positions.isNotEmpty()) {
                 val best = positions.minByOrNull { abs(it - currentIndex) }!!
                 currentIndex = best + len; missCount = 0
-                confirmNeeded = false; pendingIndex = -1
+                confirmNeeded = false; pendingIndex = -1; pendingCount = 0
                 render(); return
             }
         }
@@ -377,7 +398,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private fun restart() {
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
-        confirmNeeded = false; pendingIndex = -1
+        confirmNeeded = false; pendingIndex = -1; pendingCount = 0
         render()
         scrollView.smoothScrollTo(0, 0)
     }
