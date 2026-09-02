@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -20,9 +21,9 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -100,21 +101,31 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         column.addView(scrollView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        // Панель управления — ВНИЗУ экрана
+        // Панель управления — ВНИЗУ экрана, лента с горизонтальной прокруткой
         val bar = LinearLayout(this)
         bar.orientation = LinearLayout.HORIZONTAL
-        bar.gravity = Gravity.CENTER
-        bar.setBackgroundColor(Color.parseColor("#161616"))
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.setPadding((6 * d).toInt(), 0, (6 * d).toInt(), 0)
 
         micDot = makeBtn("●")
         btnPlay = makeBtn("▶")
         val btnRestart = makeBtn("⟲")
         btnJump = makeBtn("")
+        val btnFontMinus = makeBtn("A−")
+        val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
-        bar.addView(btnJump); bar.addView(btnEdit); bar.addView(btnSettings)
-        column.addView(bar)
+        bar.addView(btnJump); bar.addView(btnFontMinus); bar.addView(btnFontPlus)
+        bar.addView(btnEdit); bar.addView(btnSettings)
+
+        val barScroll = HorizontalScrollView(this)
+        barScroll.isHorizontalScrollBarEnabled = false
+        barScroll.setBackgroundColor(Color.parseColor("#161616"))
+        barScroll.addView(bar)
+        column.addView(barScroll, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
         root.addView(column)
 
         countdownView = TextView(this)
@@ -146,6 +157,8 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             else
                 "Перескоки ВЫКЛЮЧЕНЫ: суфлёр идёт строго по порядку")
         }
+        btnFontMinus.setOnClickListener { changeFont(-2f) }
+        btnFontPlus.setOnClickListener { changeFont(2f) }
 
         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         am.registerAudioDeviceCallback(object : AudioDeviceCallback() {
@@ -158,19 +171,44 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         else ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1)
     }
 
+    // Фон кнопки: квадратик с рамкой; активная — зелёная рамка и тёмно-зелёный фон
+    private fun btnBg(active: Boolean): GradientDrawable {
+        val d = resources.displayMetrics.density
+        val g = GradientDrawable()
+        g.setColor(Color.parseColor(if (active) "#1B3620" else "#222222"))
+        g.cornerRadius = 10 * d
+        g.setStroke((2 * d).toInt(),
+            Color.parseColor(if (active) "#4CAF50" else "#555555"))
+        return g
+    }
+
     private fun makeBtn(label: String): TextView {
         val d = resources.displayMetrics.density
         val t = TextView(this)
         t.text = label
-        t.textSize = 24f
+        t.textSize = 26f
         t.setTextColor(Color.parseColor("#EEEEEE"))
-        t.setPadding((14 * d).toInt(), (10 * d).toInt(), (14 * d).toInt(), (12 * d).toInt())
+        t.gravity = Gravity.CENTER
+        t.background = btnBg(false)
+        t.minWidth = (56 * d).toInt()
+        t.setPadding((10 * d).toInt(), 0, (10 * d).toInt(), 0)
+        val lp = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.WRAP_CONTENT, (56 * d).toInt())
+        lp.setMargins((5 * d).toInt(), (8 * d).toInt(), (5 * d).toInt(), (8 * d).toInt())
+        t.layoutParams = lp
         return t
+    }
+
+    private fun changeFont(delta: Float) {
+        fontSize = min(80f, max(20f, fontSize + delta))
+        textView.textSize = fontSize
+        prefs.edit().putFloat("font", fontSize).apply()
     }
 
     private fun updateJumpBtn() {
         btnJump.text = if (jumpEnabled) "🔀вкл" else "🔀выкл"
         btnJump.setTextColor(if (jumpEnabled) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
+        btnJump.background = btnBg(jumpEnabled)
     }
 
     // ---------- Текст ----------
@@ -291,6 +329,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
             speechService!!.startListening(this)
             isPlaying = true
             btnPlay.text = "⏸"
+            btnPlay.background = btnBg(true)
         } catch (e: Exception) {
             toast("Ошибка микрофона: " + e.message)
         }
@@ -303,6 +342,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         isPlaying = false
         partialProcessed = 0
         btnPlay.text = "▶"
+        btnPlay.background = btnBg(false)
     }
 
     private fun restart() {
@@ -385,21 +425,6 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         val p = (20 * d).toInt()
         box.setPadding(p, p, p, p)
 
-        val lbl = TextView(this)
-        lbl.text = "Размер шрифта: " + fontSize.toInt()
-        val seek = SeekBar(this)
-        seek.max = 60
-        seek.progress = fontSize.toInt() - 20
-        seek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
-                fontSize = (v + 20).toFloat()
-                textView.textSize = fontSize
-                lbl.text = "Размер шрифта: " + fontSize.toInt()
-            }
-            override fun onStartTrackingTouch(s: SeekBar?) {}
-            override fun onStopTrackingTouch(s: SeekBar?) {}
-        })
-
         val colors = LinearLayout(this)
         fun colorBtn(name: String, c: Int): Button {
             val b = Button(this)
@@ -409,14 +434,14 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         }
         colors.addView(colorBtn("Белый", Color.WHITE))
         colors.addView(colorBtn("Жёлтый", Color.parseColor("#FFEB3B")))
-        colors.addView(colorBtn("Зелёный", Color.parseColor("#8BC34A")))
+        colors.addView(colorBtn("Зелёный", Color.parseColor("#4CAF50")))
 
         val cb = CheckBox(this)
         cb.text = "Зеркальный режим"
         cb.isChecked = mirror
         cb.setOnCheckedChangeListener { _, v -> mirror = v; applyMirror() }
 
-        box.addView(lbl); box.addView(seek); box.addView(colors); box.addView(cb)
+        box.addView(colors); box.addView(cb)
 
         AlertDialog.Builder(this)
             .setTitle("Настройки")
