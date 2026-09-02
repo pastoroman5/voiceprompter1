@@ -91,7 +91,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
                 scrollAnimRunning = false
                 return
             }
-            val step = max(1, (abs(diff) * 0.10f).toInt())
+            val step = max(1, (abs(diff) * 0.05f).toInt())
             scrollView.scrollTo(0, cur + if (diff > 0) step else -step)
             handler.postDelayed(this, 16)
         }
