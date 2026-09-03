@@ -18,6 +18,7 @@ import android.os.Handler
 import android.os.Looper
 import android.text.Spannable
 import android.text.SpannableString
+import android.text.TextUtils
 import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.MotionEvent
@@ -74,9 +75,16 @@ class MainActivity : AppCompatActivity() {
     @Volatile private var listeningLoop = false
 
     // Шаг C1: индикатор звука — тонкая полоска над панелью кнопок,
-    // при звуке в ней загораются зелёные квадратики (как в звукозаписи)
+    // при звуке в ней загораются зелёные квадратики (как в звукозаписи).
+    // По просьбе пользователя: ширина 50% экрана, по центру
     private lateinit var levelBar: LinearLayout
     private val levelCells = ArrayList<View>()
+
+    // Шаг C2: очень тонкая строка контроля НАД индикатором звука —
+    // в ней бегут слова, которые система реально слышит. Та же ширина
+    // (50% экрана, по центру); при переполнении обрезается начало,
+    // чтобы всегда были видны ПОСЛЕДНИЕ услышанные слова
+    private lateinit var hypView: TextView
 
     private var jumpEnabled = true
     private var fontSize = 34f
@@ -258,6 +266,25 @@ class MainActivity : AppCompatActivity() {
         column.addView(scrollView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
+        // Общая ширина нижних индикаторов: 50% экрана, по центру
+        val indicatorWidth = resources.displayMetrics.widthPixels / 2
+
+        // Шаг C2: очень тонкая строка контроля распознавания — в ней видно,
+        // какие слова система слышит. Одна строка, мелкий приглушённый шрифт,
+        // чтобы не отвлекать от чтения; при переполнении обрезается начало
+        hypView = TextView(this)
+        hypView.textSize = 11f
+        hypView.setTextColor(Color.parseColor("#6E8F72"))
+        hypView.setSingleLine(true)
+        hypView.ellipsize = TextUtils.TruncateAt.START
+        hypView.gravity = Gravity.CENTER
+        hypView.setBackgroundColor(Color.parseColor("#101010"))
+        hypView.setPadding((6 * d).toInt(), 0, (6 * d).toInt(), 0)
+        val hlp = LinearLayout.LayoutParams(indicatorWidth,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+        hlp.gravity = Gravity.CENTER_HORIZONTAL
+        column.addView(hypView, hlp)
+
         // Шаг C1: тонкая полоска индикатора звука — прямо над панелью кнопок.
         // 30 квадратиков; чем громче звук с микрофона, тем больше их горит зелёным
         levelBar = LinearLayout(this)
@@ -273,9 +300,10 @@ class MainActivity : AppCompatActivity() {
             levelBar.addView(cell)
             levelCells.add(cell)
         }
-        column.addView(levelBar, LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT))
+        val llp = LinearLayout.LayoutParams(indicatorWidth,
+            LinearLayout.LayoutParams.WRAP_CONTENT)
+        llp.gravity = Gravity.CENTER_HORIZONTAL
+        column.addView(levelBar, llp)
 
         // Панель управления — ВНИЗУ экрана, лента с горизонтальной прокруткой
         val bar = LinearLayout(this)
@@ -951,6 +979,8 @@ class MainActivity : AppCompatActivity() {
         btnPlay.text = "▶"
         btnPlay.background = btnBg(false)
         showLevel(0)
+        // Шаг C2: при остановке очищаем строку контроля распознавания
+        hypView.text = ""
     }
 
     // Шаг C1: зажечь квадратики по громкости (0..32767).
@@ -980,6 +1010,9 @@ class MainActivity : AppCompatActivity() {
     private fun processHyp(h: String?, key: String, final: Boolean) {
         if (h.isNullOrEmpty()) return
         val s = try { JSONObject(h).optString(key, "") } catch (e: Exception) { "" }
+        // Шаг C2: показываем услышанные слова в строке контроля.
+        // Пустые partial не затирают строку — последние слова остаются видны
+        if (s.isNotBlank()) hypView.text = s.trim()
         val toks = s.trim().split(Regex("\\s+")).map { norm(it) }.filter { it.isNotEmpty() }
         // Если распознаватель пересмотрел фразу и слов стало меньше —
         // уже обработанные слова НЕ подаём заново (раньше это вызывало
