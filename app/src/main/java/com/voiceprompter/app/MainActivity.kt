@@ -13,6 +13,7 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -116,6 +117,14 @@ class MainActivity : AppCompatActivity() {
     private var confirmWordsNeeded = 3
     private var searchWindow = 15
     private var rootLayout: FrameLayout? = null
+
+    // Выбор микрофона вручную (по заданию): пользователь может указать,
+    // с какого микрофона писать звук (встроенный / гарнитура / USB /
+    // Bluetooth). Храним ТИП устройства и его имя — по ним находим
+    // устройство при каждом старте записи (числовые id системой не
+    // сохраняются между перезагрузками). -1 = «Авто (выбирает система)»
+    private var micPrefType = -1
+    private var micPrefName = ""
 
     private var rawText = ""
     private val wordsNorm = ArrayList<String>()
@@ -283,6 +292,9 @@ class MainActivity : AppCompatActivity() {
         readColor = prefs.getInt("readColor", Color.parseColor("#555555"))
         confirmWordsNeeded = prefs.getInt("confirmWords", 3)
         searchWindow = prefs.getInt("searchWin", 15)
+        // Выбор микрофона (по заданию): восстанавливаем сохранённый выбор
+        micPrefType = prefs.getInt("micType", -1)
+        micPrefName = prefs.getString("micName", "") ?: ""
         loadScripts()
         rawText = scriptTexts[currentScript]
 
@@ -395,7 +407,10 @@ class MainActivity : AppCompatActivity() {
         btnEdit.setOnClickListener { showEditor() }
         btnLibrary.setOnClickListener { showLibrary() }
         btnSettings.setOnClickListener { showSettings() }
-        micDot.setOnClickListener { toast(micInfo()) }
+        // Выбор микрофона (по заданию): нажатие на точку — меню выбора
+        // микрофона; долгое нажатие — прежняя справка о микрофоне
+        micDot.setOnClickListener { micSelectDialog() }
+        micDot.setOnLongClickListener { toast(micInfo()); true }
         btnJump.setOnClickListener {
             jumpEnabled = !jumpEnabled
             prefs.edit().putBoolean("jump", jumpEnabled).apply()
@@ -840,8 +855,40 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Следование за голосом ----------
 
-    private fun wordMatch(a: String, b: String): Boolean =
-        a == b || (a.length >= 4 && b.length >= 4 && a.substring(0, 4) == b.substring(0, 4))
+    // Нечёткое совпадение слов (по заданию, пункт 1): расстояние Левенштейна.
+    // Считает минимальное число правок (замена/вставка/удаление буквы),
+    // превращающих одно слово в другое: «привет»→«превет» = 1 правка
+    private fun editDistance(a: String, b: String): Int {
+        val n = a.length
+        val m = b.length
+        var prev = IntArray(m + 1) { it }
+        var cur = IntArray(m + 1)
+        for (i in 1..n) {
+            cur[0] = i
+            for (j in 1..m) {
+                cur[j] = min(min(prev[j] + 1, cur[j - 1] + 1),
+                    prev[j - 1] + if (a[i - 1] == b[j - 1]) 0 else 1)
+            }
+            val t = prev; prev = cur; cur = t
+        }
+        return prev[m]
+    }
+
+    // Совпадение слова текста и услышанного слова (пункт 1):
+    // 1) точное совпадение; 2) как раньше — одинаковые первые 4 буквы
+    // (покрывает окончания: «красивый/красивая»); 3) НОВОЕ — нечёткое:
+    // для слов 4-6 букв допускается 1 ошибка распознавания, для более
+    // длинных — 2 ошибки. Короткие слова (до 3 букв) сравниваются только
+    // точно, чтобы предлоги «на/но/не» не путались между собой
+    private fun wordMatch(a: String, b: String): Boolean {
+        if (a == b) return true
+        if (a.length >= 4 && b.length >= 4 && a.substring(0, 4) == b.substring(0, 4)) return true
+        val shorter = min(a.length, b.length)
+        if (shorter < 4) return false
+        if (abs(a.length - b.length) > 2) return false
+        val maxDist = if (shorter <= 6) 1 else 2
+        return editDistance(a, b) <= maxDist
+    }
 
     private fun onWord(w: String) {
         if (wordsNorm.isEmpty()) return
@@ -980,6 +1027,14 @@ class MainActivity : AppCompatActivity() {
                 toast("Ошибка микрофона: не удалось открыть запись")
                 return
             }
+            // Выбор микрофона вручную (по заданию, пункт 2): если пользователь
+            // выбрал конкретный микрофон, просим систему писать именно с него.
+            // Если выбранный микрофон сейчас не подключён — работает как «Авто»
+            if (Build.VERSION.SDK_INT >= 23) {
+                val prefDev = findPreferredMic()
+                if (prefDev != null) ar.setPreferredDevice(prefDev)
+                else if (micPrefType != -1) toast("Выбранный микрофон не найден — пишу с микрофона по умолчанию")
+            }
             recognizer = rec
             audioRecord = ar
             listeningLoop = true
@@ -1106,6 +1161,75 @@ class MainActivity : AppCompatActivity() {
         val (ext, name) = externalMic()
         return if (ext) "Внешний микрофон: $name"
         else "Встроенный микрофон телефона. Подключите петличку или гарнитуру — точка станет зелёной."
+    }
+
+    // Выбор микрофона (по заданию, пункт 2): понятное название типа устройства
+    private fun micTypeLabel(t: Int): String = when (t) {
+        AudioDeviceInfo.TYPE_BUILTIN_MIC -> "Встроенный"
+        AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Гарнитура (провод)"
+        AudioDeviceInfo.TYPE_USB_DEVICE -> "USB"
+        AudioDeviceInfo.TYPE_USB_HEADSET -> "USB-гарнитура"
+        AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth"
+        else -> "Другой"
+    }
+
+    // Выбор микрофона (по заданию, пункт 2): список микрофонов, из которых
+    // можно писать звук. Берём только «настоящие» микрофоны (встроенный,
+    // проводная гарнитура, USB, Bluetooth) и убираем дубли
+    private fun micDevices(): List<AudioDeviceInfo> {
+        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val ok = intArrayOf(AudioDeviceInfo.TYPE_BUILTIN_MIC,
+            AudioDeviceInfo.TYPE_WIRED_HEADSET, AudioDeviceInfo.TYPE_USB_DEVICE,
+            AudioDeviceInfo.TYPE_USB_HEADSET, AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
+        return am.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .filter { it.type in ok }
+            .distinctBy { it.type.toString() + "|" + it.productName }
+    }
+
+    // Выбор микрофона (по заданию, пункт 2): найти выбранное пользователем
+    // устройство среди подключённых сейчас. Сначала ищем точное совпадение
+    // тип+имя, если не нашли — любое устройство того же типа
+    private fun findPreferredMic(): AudioDeviceInfo? {
+        if (micPrefType == -1) return null
+        val devs = micDevices()
+        return devs.firstOrNull { it.type == micPrefType && it.productName.toString() == micPrefName }
+            ?: devs.firstOrNull { it.type == micPrefType }
+    }
+
+    // Выбор микрофона (по заданию, пункт 2): меню выбора. «Авто» — система
+    // сама решает (как было раньше). Выбор сохраняется и применяется при
+    // следующем нажатии ▶ (если чтение уже идёт — после паузы и старта)
+    private fun micSelectDialog() {
+        val devs = micDevices()
+        val labels = ArrayList<String>()
+        labels.add("Авто (выбирает система)")
+        for (dev in devs) labels.add(micTypeLabel(dev.type) + ": " + dev.productName)
+        var checked = 0
+        for (i in devs.indices) {
+            if (devs[i].type == micPrefType &&
+                (devs[i].productName.toString() == micPrefName || checked == 0 && micPrefType != -1)) {
+                checked = i + 1
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Микрофон для записи")
+            .setSingleChoiceItems(labels.toTypedArray(), checked) { dlg, which ->
+                if (which == 0) {
+                    micPrefType = -1; micPrefName = ""
+                    toast("Микрофон: авто (выбирает система)")
+                } else {
+                    val dev = devs[which - 1]
+                    micPrefType = dev.type
+                    micPrefName = dev.productName.toString()
+                    toast("Микрофон: " + micTypeLabel(dev.type) + " — " + dev.productName)
+                }
+                prefs.edit().putInt("micType", micPrefType)
+                    .putString("micName", micPrefName).apply()
+                if (isPlaying) toast("Новый микрофон включится после паузы ⏸ и старта ▶")
+                dlg.dismiss()
+            }
+            .setNegativeButton("Закрыть", null)
+            .show()
     }
 
     // ---------- Редактор и настройки ----------
