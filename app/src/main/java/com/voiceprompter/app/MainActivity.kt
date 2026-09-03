@@ -1044,14 +1044,20 @@ class MainActivity : AppCompatActivity() {
             // Ищем ВПЕРЁД до searchWindow слов (пока подтверждение срывалось,
             // чтец мог уйти вперёд от маркера) и НАЗАД до searchWindow слов —
             // чтобы можно было вернуться к началу фразы и продолжить оттуда.
-            // Окно настраивается в Расширенных настройках (стандарт 15)
+            // Окно настраивается в Расширенных настройках (стандарт 15).
+            // ИСПРАВЛЕНИЕ (по заданию): широкое окно поиска — это тоже
+            // перескок, поэтому оно работает ТОЛЬКО при включённой кнопке 🔀.
+            // При выключенных перескоках ищем строго рядом с курсором
+            // (до 3 слов вперёд, как в обычном движении) и назад не ищем —
+            // суфлёр идёт по порядку, как и обещает подсказка кнопки
             pendingIndex = -1; pendingCount = 0
             var found = -1
-            val fwdEnd = min(currentIndex + searchWindow, wordsNorm.size)
+            val fwdEnd = if (jumpEnabled) min(currentIndex + searchWindow, wordsNorm.size)
+                else min(currentIndex + 3, wordsNorm.size)
             for (j in currentIndex until fwdEnd) {
                 if (wordMatch(wordsNorm[j], w)) { found = j; break }
             }
-            if (found < 0) {
+            if (found < 0 && jumpEnabled) {
                 val backLimit = max(0, currentIndex - searchWindow)
                 var j = min(currentIndex, wordsNorm.size) - 1
                 while (j >= backLimit) {
