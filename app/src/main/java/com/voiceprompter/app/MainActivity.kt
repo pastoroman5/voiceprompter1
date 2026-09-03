@@ -9,7 +9,10 @@ import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
+import android.media.AudioFormat
 import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -39,15 +42,14 @@ import org.json.JSONArray
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
-import org.vosk.android.RecognitionListener
-import org.vosk.android.SpeechService
 import org.vosk.android.StorageService
 import java.io.IOException
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.sqrt
 
-class MainActivity : AppCompatActivity(), RecognitionListener {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var prefs: android.content.SharedPreferences
     private lateinit var scrollView: ScrollView
@@ -60,8 +62,21 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     private var model: Model? = null
     private var modelReady = false
-    private var speechService: SpeechService? = null
     private var isPlaying = false
+
+    // Шаг C1: собственный цикл чтения микрофона (замена SpeechService).
+    // AudioRecord отдаёт звук порциями; каждую порцию мы подаём в тот же
+    // распознаватель Vosk (распознавание не меняется) И считаем из неё
+    // громкость для индикатора уровня звука
+    private var audioRecord: AudioRecord? = null
+    private var recognizer: Recognizer? = null
+    private var audioThread: Thread? = null
+    @Volatile private var listeningLoop = false
+
+    // Шаг C1: индикатор звука — тонкая полоска над панелью кнопок,
+    // при звуке в ней загораются зелёные квадратики (как в звукозаписи)
+    private lateinit var levelBar: LinearLayout
+    private val levelCells = ArrayList<View>()
 
     private var jumpEnabled = true
     private var fontSize = 34f
@@ -242,6 +257,25 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         scrollView.addView(textView)
         column.addView(scrollView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        // Шаг C1: тонкая полоска индикатора звука — прямо над панелью кнопок.
+        // 30 квадратиков; чем громче звук с микрофона, тем больше их горит зелёным
+        levelBar = LinearLayout(this)
+        levelBar.orientation = LinearLayout.HORIZONTAL
+        levelBar.setBackgroundColor(Color.parseColor("#101010"))
+        levelBar.setPadding((6 * d).toInt(), (2 * d).toInt(), (6 * d).toInt(), (2 * d).toInt())
+        for (i in 0 until LEVEL_CELLS) {
+            val cell = View(this)
+            val clp = LinearLayout.LayoutParams(0, (5 * d).toInt(), 1f)
+            clp.setMargins((1 * d).toInt(), 0, (1 * d).toInt(), 0)
+            cell.layoutParams = clp
+            cell.setBackgroundColor(Color.parseColor("#222222"))
+            levelBar.addView(cell)
+            levelCells.add(cell)
+        }
+        column.addView(levelBar, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT))
 
         // Панель управления — ВНИЗУ экрана, лента с горизонтальной прокруткой
         val bar = LinearLayout(this)
@@ -844,11 +878,54 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         handler.postDelayed(r, 1000)
     }
 
+    // Шаг C1: собственный цикл чтения микрофона вместо SpeechService.
+    // Звук читается порциями по ~100 мс; каждая порция идёт В ТОТ ЖЕ
+    // распознаватель Vosk (той же частотой 16 кГц), а её громкость —
+    // на индикатор уровня. Логика следования за текстом не изменена:
+    // partial/final обрабатывает тот же processHyp, что и раньше
     private fun startListening() {
         try {
             val rec = Recognizer(model, 16000.0f)
-            speechService = SpeechService(rec, 16000.0f)
-            speechService!!.startListening(this)
+            val minBuf = AudioRecord.getMinBufferSize(16000,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val ar = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, 16000,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
+                max(minBuf, 9600) * 2)
+            if (ar.state != AudioRecord.STATE_INITIALIZED) {
+                ar.release()
+                rec.close()
+                toast("Ошибка микрофона: не удалось открыть запись")
+                return
+            }
+            recognizer = rec
+            audioRecord = ar
+            listeningLoop = true
+            ar.startRecording()
+            audioThread = Thread {
+                val buf = ShortArray(1600) // ~100 мс звука при 16 кГц
+                while (listeningLoop) {
+                    val n = audioRecord?.read(buf, 0, buf.size) ?: -1
+                    if (n <= 0) continue
+                    // Громкость порции — пиковая амплитуда для квадратиков
+                    var peak = 0
+                    for (i in 0 until n) {
+                        val v = abs(buf[i].toInt())
+                        if (v > peak) peak = v
+                    }
+                    handler.post { showLevel(peak) }
+                    // Тот же распознаватель Vosk, что и раньше
+                    val r = recognizer ?: break
+                    if (!listeningLoop) break
+                    if (r.acceptWaveForm(buf, n)) {
+                        val res = r.result
+                        handler.post { if (isPlaying) processHyp(res, "text", true) }
+                    } else {
+                        val res = r.partialResult
+                        handler.post { if (isPlaying) processHyp(res, "partial", false) }
+                    }
+                }
+            }
+            audioThread!!.start()
             isPlaying = true
             btnPlay.text = "⏸"
             btnPlay.background = btnBg(true)
@@ -858,13 +935,33 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
     }
 
     private fun stopListening() {
-        speechService?.stop()
-        speechService?.shutdown()
-        speechService = null
+        // Порядок важен: сначала гасим цикл, потом останавливаем запись
+        // (это разблокирует read), дожидаемся конца потока и лишь затем
+        // освобождаем распознаватель — чтобы не закрыть его под ногами у цикла
+        listeningLoop = false
+        try { audioRecord?.stop() } catch (e: Exception) { }
+        try { audioThread?.join(700) } catch (e: InterruptedException) { }
+        audioThread = null
+        try { audioRecord?.release() } catch (e: Exception) { }
+        audioRecord = null
+        try { recognizer?.close() } catch (e: Exception) { }
+        recognizer = null
         isPlaying = false
         partialProcessed = 0
         btnPlay.text = "▶"
         btnPlay.background = btnBg(false)
+        showLevel(0)
+    }
+
+    // Шаг C1: зажечь квадратики по громкости (0..32767).
+    // Квадратный корень — чтобы тихая речь тоже была видна на индикаторе
+    private fun showLevel(peak: Int) {
+        val frac = sqrt(min(32767, max(0, peak)) / 32767f)
+        val lit = min(LEVEL_CELLS, (frac * LEVEL_CELLS).toInt())
+        for (i in levelCells.indices) {
+            levelCells[i].setBackgroundColor(
+                if (i < lit) Color.parseColor("#4CAF50") else Color.parseColor("#222222"))
+        }
     }
 
     private fun restart() {
@@ -894,12 +991,6 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
         for (i in partialProcessed until toks.size) onWord(toks[i])
         partialProcessed = if (final) 0 else toks.size
     }
-
-    override fun onPartialResult(hypothesis: String?) { processHyp(hypothesis, "partial", false) }
-    override fun onResult(hypothesis: String?) { processHyp(hypothesis, "text", true) }
-    override fun onFinalResult(hypothesis: String?) { processHyp(hypothesis, "text", true) }
-    override fun onError(exception: Exception?) { toast("Ошибка распознавания: " + exception?.message) }
-    override fun onTimeout() {}
 
     // ---------- Микрофон ----------
 
@@ -1072,5 +1163,7 @@ class MainActivity : AppCompatActivity(), RecognitionListener {
 
     companion object {
         private const val REQ_IMPORT_TXT = 42
+        // Шаг C1: количество квадратиков в индикаторе звука
+        private const val LEVEL_CELLS = 30
     }
 }
