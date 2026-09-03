@@ -92,6 +92,16 @@ class MainActivity : AppCompatActivity() {
     private var audioThread: Thread? = null
     @Volatile private var listeningLoop = false
 
+    // Этап 2 (камера), шаг 3 (раздвоение звука): на Android 10+ система сама
+    // раздаёт один поток микрофона и записи видео (CameraX), и распознаванию
+    // (Vosk). «Сторожок тишины» ниже следит, что распознавание во время
+    // записи действительно получает звук; если телефон отдаёт ему тишину —
+    // предупреждаем и советуем режим АВТО. silentMs — сколько миллисекунд
+    // подряд тишина при идущей записи; micConflictWarned — предупреждение
+    // уже показано (показываем один раз за запись)
+    @Volatile private var silentMs = 0L
+    @Volatile private var micConflictWarned = false
+
     // Шаг C1: индикатор звука — тонкая полоска над панелью кнопок,
     // при звуке в ней загораются зелёные квадратики (как в звукозаписи).
     // По просьбе пользователя: ширина 50% экрана, по центру
@@ -1161,18 +1171,32 @@ class MainActivity : AppCompatActivity() {
             recognizer = rec
             audioRecord = ar
             listeningLoop = true
+            // Шаг 3 (раздвоение звука): сторожок тишины — с чистого листа
+            silentMs = 0
+            micConflictWarned = false
             ar.startRecording()
             audioThread = Thread {
                 val buf = ShortArray(1600) // ~100 мс звука при 16 кГц
                 while (listeningLoop) {
                     val n = audioRecord?.read(buf, 0, buf.size) ?: -1
-                    if (n <= 0) continue
+                    if (n <= 0) {
+                        // Шаг 3: микрофон не отдаёт данные (например, занят
+                        // записью видео на некоторых телефонах) — не крутим
+                        // цикл впустую и считаем это тишиной для сторожка
+                        try { Thread.sleep(50) } catch (e: InterruptedException) { }
+                        if (isRecording) checkSilence(50) else silentMs = 0
+                        continue
+                    }
                     // Громкость порции — пиковая амплитуда для квадратиков
                     var peak = 0
                     for (i in 0 until n) {
                         val v = abs(buf[i].toInt())
                         if (v > peak) peak = v
                     }
+                    // Шаг 3 (раздвоение звука): во время записи распознавание
+                    // должно получать живой звук; если подряд идёт полная
+                    // тишина — телефон не делит микрофон между потребителями
+                    if (isRecording && peak < 30) checkSilence(100) else silentMs = 0
                     handler.post { showLevel(peak) }
                     // Тот же распознаватель Vosk, что и раньше
                     val r = recognizer ?: break
@@ -1192,6 +1216,21 @@ class MainActivity : AppCompatActivity() {
             btnPlay.background = btnBg(true)
         } catch (e: Exception) {
             toast("Ошибка микрофона: " + e.message)
+        }
+    }
+
+    // Шаг 3 (раздвоение звука): учёт тишины во время записи видео. Если при
+    // идущей записи распознавание 3 секунды подряд получает полную тишину —
+    // значит, этот телефон не умеет отдавать один микрофон и записи, и
+    // распознаванию одновременно. Предупреждаем ОДИН раз за запись и
+    // советуем резервный режим АВТО (он микрофон не использует)
+    private fun checkSilence(ms: Long) {
+        silentMs += ms
+        if (silentMs >= 3000 && !micConflictWarned) {
+            micConflictWarned = true
+            handler.post {
+                toast("⚠ Во время записи телефон не передаёт звук распознаванию — следование за голосом работать не будет. Используйте режим АВТО.")
+            }
         }
     }
 
@@ -1442,9 +1481,11 @@ class MainActivity : AppCompatActivity() {
     // Кнопка ⏺: старт/стоп записи видео со звуком. Файл сохраняется в
     // галерею: Movies/VoicePrompter/VP_дата_время.mp4. Во время записи
     // кнопка красная и показывает время (recTimer).
-    // ВНИМАНИЕ (до шага 3): запись и голосовое следование берут звук с
-    // микрофона независимо друг от друга — на части телефонов один из
-    // потоков может получать тишину. Шаг 3 разведёт один поток на оба
+    // Шаг 3 (раздвоение звука): один физический микрофон система (Android
+    // 10+) сама раздаёт двум потребителям — записи видео (CameraX) и
+    // распознаванию (Vosk). «Сторожок тишины» в цикле микрофона проверяет,
+    // что распознавание при записи действительно получает звук, и честно
+    // предупреждает, если конкретный телефон делить микрофон не умеет
     private fun toggleRecording() {
         if (isRecording) { stopRecording(); return }
         if (!cameraOn) { toast("Сначала включите камеру 🎥"); return }
@@ -1479,8 +1520,9 @@ class MainActivity : AppCompatActivity() {
                             btnRec.background = btnBg(true)
                             handler.removeCallbacks(recTimer)
                             handler.postDelayed(recTimer, 1000)
-                            // Честное предупреждение до шага 3 (см. комментарий выше)
-                            if (isPlaying) toast("Внимание: до шага 3 следование за голосом во время записи может не работать на некоторых телефонах")
+                            // Шаг 3: новая запись — сторожок тишины с нуля
+                            silentMs = 0
+                            micConflictWarned = false
                         }
                         is VideoRecordEvent.Finalize -> {
                             isRecording = false
