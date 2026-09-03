@@ -99,6 +99,22 @@ class MainActivity : AppCompatActivity() {
     private var activeLineFromTop = 3
     private var followSpeedStep = 3
 
+    // Расширенные настройки (добавлено по заданию):
+    // - цвет фона и его яркость («прозрачность»: 100% — чистый цвет,
+    //   меньше — цвет гаснет к чёрному);
+    // - межстрочный интервал (хранится как число x100: 125 = 1.25);
+    // - цвет «прочитанного» (затемнённого) текста;
+    // - чувствительность: сколько слов текста подряд нужно для
+    //   подтверждения после посторонних слов (стандарт 3) и окно поиска
+    //   в словах вперёд/назад при подтверждении (стандарт 15)
+    private var bgColor = Color.BLACK
+    private var bgAlpha = 100
+    private var lineSpacingStep = 125
+    private var readColor = Color.parseColor("#555555")
+    private var confirmWordsNeeded = 3
+    private var searchWindow = 15
+    private var rootLayout: FrameLayout? = null
+
     private var rawText = ""
     private val wordsNorm = ArrayList<String>()
     private val wordStarts = ArrayList<Int>()
@@ -108,7 +124,8 @@ class MainActivity : AppCompatActivity() {
     private val recent = ArrayList<String>()
     private var partialProcessed = 0
     // Защита от ложного старта: после посторонних слов суфлёр не двигается,
-    // пока не услышит ТРИ слова текста подряд
+    // пока не услышит подряд столько слов текста, сколько задано в настройке
+    // «Слов для подтверждения» (стандарт 3)
     private var confirmNeeded = false
     private var pendingIndex = -1
     private var pendingCount = 0
@@ -257,12 +274,20 @@ class MainActivity : AppCompatActivity() {
         autoSpeed = prefs.getInt("autoSpeed", 30)
         activeLineFromTop = prefs.getInt("activeLine", 3)
         followSpeedStep = prefs.getInt("followSpeed", 3)
+        // Расширенные настройки
+        bgColor = prefs.getInt("bgColor", Color.BLACK)
+        bgAlpha = prefs.getInt("bgAlpha", 100)
+        lineSpacingStep = prefs.getInt("lineSpacing", 125)
+        readColor = prefs.getInt("readColor", Color.parseColor("#555555"))
+        confirmWordsNeeded = prefs.getInt("confirmWords", 3)
+        searchWindow = prefs.getInt("searchWin", 15)
         loadScripts()
         rawText = scriptTexts[currentScript]
 
         val d = resources.displayMetrics.density
         val root = FrameLayout(this)
-        root.setBackgroundColor(Color.BLACK)
+        rootLayout = root
+        applyBackground()
 
         val column = LinearLayout(this)
         column.orientation = LinearLayout.VERTICAL
@@ -271,7 +296,7 @@ class MainActivity : AppCompatActivity() {
         textView = TextView(this)
         textView.setTextColor(activeColor)
         textView.textSize = fontSize
-        textView.setLineSpacing(0f, 1.25f)
+        textView.setLineSpacing(0f, lineSpacingStep / 100f)
         textView.setPadding((16 * d).toInt(), (8 * d).toInt(), (16 * d).toInt(), (500 * d).toInt())
         scrollView.addView(textView)
         column.addView(scrollView, LinearLayout.LayoutParams(
@@ -451,6 +476,17 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         savePosition()
+    }
+
+    // Расширенные настройки: фон экрана. Яркость (bgAlpha, %) гасит выбранный
+    // цвет к чёрному: 100% — чистый цвет, 0% — полностью чёрный
+    private fun applyBackground() {
+        val f = bgAlpha / 100f
+        val c = Color.rgb(
+            (Color.red(bgColor) * f).toInt(),
+            (Color.green(bgColor) * f).toInt(),
+            (Color.blue(bgColor) * f).toInt())
+        rootLayout?.setBackgroundColor(c)
     }
 
     // Фон кнопки: квадратик с рамкой; активная — зелёная рамка и тёмно-зелёный фон
@@ -775,7 +811,8 @@ class MainActivity : AppCompatActivity() {
     private fun render() {
         val sp = SpannableString(rawText)
         if (currentIndex > 0 && currentIndex <= wordEnds.size) {
-            sp.setSpan(ForegroundColorSpan(Color.parseColor("#555555")),
+            // Цвет «прочитанного» настраивается в Расширенных настройках
+            sp.setSpan(ForegroundColorSpan(readColor),
                 0, wordEnds[currentIndex - 1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
         }
         textView.text = sp
@@ -808,13 +845,14 @@ class MainActivity : AppCompatActivity() {
         if (recent.size > 4) recent.removeAt(0)
 
         // Режим подтверждения: были посторонние слова, суфлёр стоит на месте
-        // и сдвинется только после ТРЁХ слов текста подряд
+        // и сдвинется только после НАСТРОЕННОГО числа слов текста подряд
+        // (стандарт 3, меняется в Расширенных настройках)
         if (confirmNeeded) {
             if (pendingIndex in 0 until wordsNorm.size && wordMatch(wordsNorm[pendingIndex], w)) {
                 pendingCount++
                 pendingIndex++
-                if (pendingCount >= 3) {
-                    // три слова текста подряд — это точно чтение
+                if (pendingCount >= confirmWordsNeeded) {
+                    // нужное число слов текста подряд — это точно чтение
                     currentIndex = pendingIndex
                     confirmNeeded = false; pendingIndex = -1; pendingCount = 0; missCount = 0
                     render()
@@ -822,17 +860,18 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             // Цепочка оборвалась — пробуем начать новую с этого слова.
-            // Ищем ВПЕРЁД до 15 слов (пока подтверждение срывалось, чтец мог
-            // уйти вперёд от маркера) и НАЗАД до 15 слов — чтобы можно было
-            // вернуться к началу фразы и продолжить оттуда
+            // Ищем ВПЕРЁД до searchWindow слов (пока подтверждение срывалось,
+            // чтец мог уйти вперёд от маркера) и НАЗАД до searchWindow слов —
+            // чтобы можно было вернуться к началу фразы и продолжить оттуда.
+            // Окно настраивается в Расширенных настройках (стандарт 15)
             pendingIndex = -1; pendingCount = 0
             var found = -1
-            val fwdEnd = min(currentIndex + 15, wordsNorm.size)
+            val fwdEnd = min(currentIndex + searchWindow, wordsNorm.size)
             for (j in currentIndex until fwdEnd) {
                 if (wordMatch(wordsNorm[j], w)) { found = j; break }
             }
             if (found < 0) {
-                val backLimit = max(0, currentIndex - 15)
+                val backLimit = max(0, currentIndex - searchWindow)
                 var j = min(currentIndex, wordsNorm.size) - 1
                 while (j >= backLimit) {
                     if (wordMatch(wordsNorm[j], w)) { found = j; break }
@@ -1215,15 +1254,142 @@ class MainActivity : AppCompatActivity() {
         })
         box.addView(spdLabel); box.addView(spdSb)
 
+        // ===== РАСШИРЕННЫЕ НАСТРОЙКИ (добавлено по заданию) =====
+        val advTitle = TextView(this)
+        advTitle.text = "— Расширенные —"
+        advTitle.textSize = 16f
+        advTitle.gravity = Gravity.CENTER
+        advTitle.setPadding(0, (12 * d).toInt(), 0, (4 * d).toInt())
+        box.addView(advTitle)
+
+        // Цвет фона: применяется сразу (с учётом текущей яркости)
+        val bgLabel = TextView(this)
+        bgLabel.text = "Цвет фона:"
+        bgLabel.textSize = 16f
+        val bgRow = LinearLayout(this)
+        fun bgBtn(name: String, c: Int): Button {
+            val b = Button(this)
+            b.text = name
+            b.setOnClickListener { bgColor = c; applyBackground() }
+            return b
+        }
+        bgRow.addView(bgBtn("Чёрный", Color.BLACK))
+        bgRow.addView(bgBtn("Серый", Color.parseColor("#3A3A3A")))
+        bgRow.addView(bgBtn("Синий", Color.parseColor("#1A2A4A")))
+        box.addView(bgLabel); box.addView(bgRow)
+
+        // Прозрачность (яркость) фона: 100% — чистый выбранный цвет,
+        // меньше — цвет гаснет к чёрному. Применяется сразу
+        val bgaLabel = TextView(this)
+        bgaLabel.text = "Прозрачность фона: $bgAlpha%"
+        bgaLabel.textSize = 16f
+        val bgaSb = SeekBar(this)
+        bgaSb.max = 100
+        bgaSb.progress = bgAlpha
+        bgaSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                bgAlpha = v
+                bgaLabel.text = "Прозрачность фона: $bgAlpha%"
+                if (fromUser) applyBackground()
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(bgaLabel); box.addView(bgaSb)
+
+        // Межстрочный интервал: 1.00..2.00, стандарт 1.25. Применяется сразу
+        val lsLabel = TextView(this)
+        lsLabel.text = "Межстрочный интервал: " + String.format("%.2f", lineSpacingStep / 100f)
+        lsLabel.textSize = 16f
+        val lsSb = SeekBar(this)
+        lsSb.max = 20 // шаг 0.05: 100 + v*5 = 100..200
+        lsSb.progress = (lineSpacingStep - 100) / 5
+        lsSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                lineSpacingStep = 100 + v * 5
+                lsLabel.text = "Межстрочный интервал: " + String.format("%.2f", lineSpacingStep / 100f)
+                if (fromUser) {
+                    textView.setLineSpacing(0f, lineSpacingStep / 100f)
+                    textView.post { autoScroll() }
+                }
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(lsLabel); box.addView(lsSb)
+
+        // Цвет «прочитанного» (затемнённого) текста: применяется сразу
+        val rcLabel = TextView(this)
+        rcLabel.text = "Цвет прочитанного:"
+        rcLabel.textSize = 16f
+        val rcRow = LinearLayout(this)
+        fun rcBtn(name: String, c: Int): Button {
+            val b = Button(this)
+            b.text = name
+            b.setOnClickListener { readColor = c; render() }
+            return b
+        }
+        rcRow.addView(rcBtn("Серый", Color.parseColor("#555555")))
+        rcRow.addView(rcBtn("Тёмный", Color.parseColor("#333333")))
+        rcRow.addView(rcBtn("Синий", Color.parseColor("#3A5A8A")))
+        rcRow.addView(rcBtn("Зелёный", Color.parseColor("#2E6A38")))
+        box.addView(rcLabel); box.addView(rcRow)
+
+        // Чувствительность: сколько слов текста подряд нужно, чтобы суфлёр
+        // «поверил», что вы вернулись к чтению после посторонних слов
+        val cwLabel = TextView(this)
+        cwLabel.text = "Слов для подтверждения: $confirmWordsNeeded"
+        cwLabel.textSize = 16f
+        val cwSb = SeekBar(this)
+        cwSb.max = 4 // 1..5
+        cwSb.progress = confirmWordsNeeded - 1
+        cwSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                confirmWordsNeeded = v + 1
+                cwLabel.text = "Слов для подтверждения: $confirmWordsNeeded"
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(cwLabel); box.addView(cwSb)
+
+        // Окно поиска при подтверждении: на сколько слов вперёд/назад от
+        // текущего места суфлёр ищет произнесённое слово (стандарт 15)
+        val swLabel = TextView(this)
+        swLabel.text = "Окно поиска: $searchWindow слов"
+        swLabel.textSize = 16f
+        val swSb = SeekBar(this)
+        swSb.max = 25 // 5..30
+        swSb.progress = searchWindow - 5
+        swSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                searchWindow = v + 5
+                swLabel.text = "Окно поиска: $searchWindow слов"
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(swLabel); box.addView(swSb)
+
+        // Настроек стало много — оборачиваем в прокрутку, чтобы всё помещалось
+        val scroll = ScrollView(this)
+        scroll.addView(box)
+
         AlertDialog.Builder(this)
             .setTitle("Настройки")
-            .setView(box)
+            .setView(scroll)
             .setPositiveButton("Готово") { _, _ ->
                 prefs.edit().putFloat("font", fontSize)
                     .putInt("color", activeColor)
                     .putBoolean("mirror", mirror)
                     .putInt("activeLine", activeLineFromTop)
-                    .putInt("followSpeed", followSpeedStep).apply()
+                    .putInt("followSpeed", followSpeedStep)
+                    .putInt("bgColor", bgColor)
+                    .putInt("bgAlpha", bgAlpha)
+                    .putInt("lineSpacing", lineSpacingStep)
+                    .putInt("readColor", readColor)
+                    .putInt("confirmWords", confirmWordsNeeded)
+                    .putInt("searchWin", searchWindow).apply()
             }
             .show()
     }
