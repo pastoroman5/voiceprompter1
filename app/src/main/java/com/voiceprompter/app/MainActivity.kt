@@ -38,6 +38,10 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
@@ -125,6 +129,20 @@ class MainActivity : AppCompatActivity() {
     // сохраняются между перезагрузками). -1 = «Авто (выбирает система)»
     private var micPrefType = -1
     private var micPrefName = ""
+
+    // Этап 2 (камера), шаг 1: превью камеры. PreviewView — САМЫЙ НИЖНИЙ
+    // слой окна (под текстом и кнопками), scrimView — цветная подложка
+    // МЕЖДУ камерой и текстом. applyBackground() красит подложку, поэтому
+    // существующие настройки «Цвет фона» и «Прозрачность фона» управляют
+    // видимостью камеры: 100% — камеры не видно, 0% — видна полностью.
+    // useFrontCamera: фронтальная (стандарт) или задняя, переключается
+    // долгим нажатием на кнопку 🎥 и сохраняется
+    private var previewView: PreviewView? = null
+    private var scrimView: View? = null
+    private var cameraOn = false
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var useFrontCamera = true
+    private lateinit var btnCam: TextView
 
     private var rawText = ""
     private val wordsNorm = ArrayList<String>()
@@ -306,12 +324,34 @@ class MainActivity : AppCompatActivity() {
         // Выбор микрофона (по заданию): восстанавливаем сохранённый выбор
         micPrefType = prefs.getInt("micType", -1)
         micPrefName = prefs.getString("micName", "") ?: ""
+        // Этап 2 (камера), шаг 1: какая камера была выбрана в прошлый раз
+        useFrontCamera = prefs.getBoolean("camFront", true)
         loadScripts()
         rawText = scriptTexts[currentScript]
 
         val d = resources.displayMetrics.density
         val root = FrameLayout(this)
         rootLayout = root
+
+        // Этап 2 (камера), шаг 1: превью камеры — самый нижний слой окна.
+        // Пока камера выключена — скрыто и не потребляет ресурсов
+        val pv = PreviewView(this)
+        pv.visibility = View.GONE
+        previewView = pv
+        root.addView(pv, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT))
+
+        // Этап 2 (камера), шаг 1: цветная подложка МЕЖДУ камерой и текстом.
+        // applyBackground() теперь красит её, а не корень окна — фон корня
+        // всегда рисуется ПОД превью камеры, и камеру не было бы видно.
+        // Поведение прозрачности БЕЗ камеры не изменилось: при < 100%
+        // сквозь подложку виден рабочий стол (TransparentTheme)
+        val scrim = View(this)
+        scrimView = scrim
+        root.addView(scrim, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT))
         applyBackground()
 
         val column = LinearLayout(this)
@@ -377,13 +417,16 @@ class MainActivity : AppCompatActivity() {
         val btnRestart = makeBtn("⟲")
         btnJump = makeBtn("")
         btnAuto = makeBtn("АВТО")
+        // Этап 2 (камера), шаг 1: кнопка включения превью камеры
+        btnCam = makeBtn("🎥")
         val btnFontMinus = makeBtn("A−")
         val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
         val btnLibrary = makeBtn("📚")
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
-        bar.addView(btnJump); bar.addView(btnAuto); bar.addView(btnFontMinus); bar.addView(btnFontPlus)
+        bar.addView(btnJump); bar.addView(btnAuto); bar.addView(btnCam)
+        bar.addView(btnFontMinus); bar.addView(btnFontPlus)
         bar.addView(btnEdit); bar.addView(btnLibrary); bar.addView(btnSettings)
 
         val barScroll = HorizontalScrollView(this)
@@ -422,6 +465,16 @@ class MainActivity : AppCompatActivity() {
         // микрофона; долгое нажатие — прежняя справка о микрофоне
         micDot.setOnClickListener { micSelectDialog() }
         micDot.setOnLongClickListener { toast(micInfo()); true }
+        // Этап 2 (камера), шаг 1: нажатие — превью вкл/выкл; долгое
+        // нажатие — переключение фронтальная/задняя камера
+        btnCam.setOnClickListener { toggleCamera() }
+        btnCam.setOnLongClickListener {
+            useFrontCamera = !useFrontCamera
+            prefs.edit().putBoolean("camFront", useFrontCamera).apply()
+            toast(if (useFrontCamera) "Камера: фронтальная" else "Камера: задняя")
+            if (cameraOn) bindCamera()
+            true
+        }
         btnJump.setOnClickListener {
             jumpEnabled = !jumpEnabled
             prefs.edit().putBoolean("jump", jumpEnabled).apply()
@@ -507,15 +560,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Расширенные настройки: фон экрана. НАСТОЯЩАЯ прозрачность (по заданию):
-    // процент применяется к альфа-каналу фона всего окна. 100% — плотный
-    // выбранный цвет; 0% — фон полностью исчезает, и под текстом виден
-    // рабочий стол телефона. Работает в паре с TransparentTheme
-    // (styles.xml + AndroidManifest.xml): без неё система подложила бы
-    // под окно чёрную подложку. Текст, кнопки и индикаторы прозрачность
-    // не затрагивает — они остаются полностью видимыми
+    // процент применяется к альфа-каналу цветной подложки (scrimView). 100% —
+    // плотный выбранный цвет; 0% — подложка полностью исчезает, и под текстом
+    // видно то, что ниже: превью камеры (если включена кнопкой 🎥) или рабочий
+    // стол телефона (TransparentTheme в styles.xml + AndroidManifest.xml).
+    // Текст, кнопки и индикаторы прозрачность не затрагивает
     private fun applyBackground() {
         val a = (bgAlpha * 255 / 100).coerceIn(0, 255)
-        rootLayout?.setBackgroundColor(Color.argb(a,
+        scrimView?.setBackgroundColor(Color.argb(a,
             Color.red(bgColor), Color.green(bgColor), Color.blue(bgColor)))
     }
 
@@ -1264,6 +1316,63 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
+    // ---------- Камера (этап 2, шаг 1: превью) ----------
+
+    // Кнопка 🎥: включить/выключить превью камеры. Запись видео появится
+    // на следующем шаге — пока это «зеркало» для кадрирования.
+    // Чтобы видеть себя, уменьшите «Прозрачность фона» в настройках:
+    // подложка станет прозрачной и под текстом появится изображение камеры
+    private fun toggleCamera() {
+        if (cameraOn) { stopCamera(); return }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), 2)
+            return
+        }
+        startCamera()
+    }
+
+    private fun startCamera() {
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                cameraProvider = future.get()
+                bindCamera()
+                previewView?.visibility = View.VISIBLE
+                cameraOn = true
+                btnCam.setTextColor(Color.parseColor("#4CAF50"))
+                btnCam.background = btnBg(true)
+                if (bgAlpha > 50) toast("Камера включена. Чтобы видеть себя, уменьшите «Прозрачность фона» в ⚙")
+            } catch (e: Exception) {
+                toast("Ошибка камеры: " + e.message)
+            }
+        }, ContextCompat.getMainExecutor(this))
+    }
+
+    // Привязка камеры к экрану. bindToLifecycle сам останавливает камеру
+    // при сворачивании приложения и включает при возврате
+    private fun bindCamera() {
+        val provider = cameraProvider ?: return
+        try {
+            val preview = Preview.Builder().build()
+            preview.setSurfaceProvider(previewView?.surfaceProvider)
+            val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA
+                else CameraSelector.DEFAULT_BACK_CAMERA
+            provider.unbindAll()
+            provider.bindToLifecycle(this, selector, preview)
+        } catch (e: Exception) {
+            toast("Ошибка камеры: " + e.message)
+        }
+    }
+
+    private fun stopCamera() {
+        try { cameraProvider?.unbindAll() } catch (e: Exception) { }
+        previewView?.visibility = View.GONE
+        cameraOn = false
+        btnCam.setTextColor(Color.parseColor("#EEEEEE"))
+        btnCam.background = btnBg(false)
+    }
+
     // ---------- Редактор и настройки ----------
 
     private fun showEditor() {
@@ -1438,9 +1547,9 @@ class MainActivity : AppCompatActivity() {
         box.addView(bgLabel); box.addView(bgRow)
 
         // НАСТОЯЩАЯ прозрачность фона (по заданию): 100% — плотный выбранный
-        // цвет, 0% — фон полностью исчезает и под текстом виден рабочий стол
-        // телефона (требует TransparentTheme в styles.xml + AndroidManifest.xml).
-        // Применяется сразу
+        // цвет, 0% — фон полностью исчезает и под текстом видна камера (если
+        // включена) или рабочий стол телефона (TransparentTheme в styles.xml
+        // + AndroidManifest.xml). Применяется сразу
         val bgaLabel = TextView(this)
         bgaLabel.text = "Прозрачность фона: $bgAlpha%"
         bgaLabel.textSize = 16f
@@ -1600,7 +1709,12 @@ class MainActivity : AppCompatActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 1 && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) initModel()
-        else toast("Без доступа к микрофону суфлёр не сможет вас слышать")
+        else if (requestCode == 1) toast("Без доступа к микрофону суфлёр не сможет вас слышать")
+        // Этап 2 (камера), шаг 1: ответ на запрос разрешения «Камера»
+        if (requestCode == 2) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) startCamera()
+            else toast("Без доступа к камере превью не работает")
+        }
     }
 
     override fun onDestroy() {
