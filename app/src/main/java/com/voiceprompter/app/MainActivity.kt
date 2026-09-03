@@ -83,13 +83,21 @@ class MainActivity : AppCompatActivity() {
     // Шаг C2: очень тонкая строка контроля НАД индикатором звука —
     // в ней бегут слова, которые система реально слышит. Та же ширина
     // (50% экрана, по центру); при переполнении обрезается начало,
-    // чтобы всегда были видны ПОСЛЕДНИЕ услышанные слова
+    // чтобы всегда были видны ПОСЛЕДНИЕ услышанные слова.
+    // По просьбе пользователя: показываются только ОКОНЧАТЕЛЬНЫЕ (final)
+    // результаты распознавания — без промежуточных «редактируемых» гипотез
     private lateinit var hypView: TextView
 
     private var jumpEnabled = true
     private var fontSize = 34f
     private var activeColor = Color.WHITE
     private var mirror = false
+
+    // Настройки (добавлено по заданию): номер активной строки сверху
+    // (стандарт 3 — над ней две затемнённые строки) и скорость плавной
+    // прокрутки при чтении (стандарт 3, внутри используется как 0.03)
+    private var activeLineFromTop = 3
+    private var followSpeedStep = 3
 
     private var rawText = ""
     private val wordsNorm = ArrayList<String>()
@@ -124,6 +132,7 @@ class MainActivity : AppCompatActivity() {
     // Плавная прокрутка: лента каждый кадр подъезжает к цели на часть
     // оставшегося расстояния — без прыжков со строчки на строчку.
     // Чем больше отставание (быстрое чтение), тем быстрее едет.
+    // Доля за кадр настраивается в Настройках (followSpeedStep / 100)
     private var targetScrollY = 0
     private var scrollAnimRunning = false
     private val scrollStep = object : Runnable {
@@ -135,7 +144,7 @@ class MainActivity : AppCompatActivity() {
                 scrollAnimRunning = false
                 return
             }
-            val step = max(1, (abs(diff) * 0.03f).toInt())
+            val step = max(1, (abs(diff) * followSpeedStep / 100f).toInt())
             scrollView.scrollTo(0, cur + if (diff > 0) step else -step)
             handler.postDelayed(this, 16)
         }
@@ -217,11 +226,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Шаг B2: курсор подхватывает место, куда пользователь перемотал ленту.
-    // Активной становится строка, стоящая ТРЕТЬЕЙ сверху (как при чтении)
+    // Активной становится строка на настроенной позиции сверху (стандарт — третья)
     private fun syncIndexToScroll() {
         val layout = textView.layout ?: return
         if (wordsNorm.isEmpty()) return
-        val y = max(0, scrollView.scrollY - textView.paddingTop + 2 * textView.lineHeight)
+        val y = max(0, scrollView.scrollY - textView.paddingTop + (activeLineFromTop - 1) * textView.lineHeight)
         val line = layout.getLineForVertical(y)
         val off = layout.getLineStart(line)
         var idx = wordsNorm.size
@@ -246,6 +255,8 @@ class MainActivity : AppCompatActivity() {
         mirror = prefs.getBoolean("mirror", false)
         autoMode = prefs.getBoolean("autoMode", false)
         autoSpeed = prefs.getInt("autoSpeed", 30)
+        activeLineFromTop = prefs.getInt("activeLine", 3)
+        followSpeedStep = prefs.getInt("followSpeed", 3)
         loadScripts()
         rawText = scriptTexts[currentScript]
 
@@ -771,14 +782,15 @@ class MainActivity : AppCompatActivity() {
         textView.post { autoScroll() }
     }
 
-    // Активная строка — ТРЕТЬЯ сверху: над ней две затемнённые строки.
+    // Активная строка — на настроенной позиции сверху (стандарт: третья,
+    // над ней две затемнённые строки; меняется в Настройках).
     // Лента подъезжает к цели ПЛАВНО (см. scrollStep), без прыжков
     private fun autoScroll() {
         if (userTouching) return // Шаг B2: пока палец на экране — не анимируем
         val layout = textView.layout ?: return
         val charPos = if (currentIndex < wordStarts.size) wordStarts[currentIndex] else rawText.length
         val line = layout.getLineForOffset(charPos)
-        targetScrollY = max(0, layout.getLineTop(line) + textView.paddingTop - 2 * textView.lineHeight)
+        targetScrollY = max(0, layout.getLineTop(line) + textView.paddingTop - (activeLineFromTop - 1) * textView.lineHeight)
         if (!scrollAnimRunning) {
             scrollAnimRunning = true
             handler.post(scrollStep)
@@ -1010,9 +1022,11 @@ class MainActivity : AppCompatActivity() {
     private fun processHyp(h: String?, key: String, final: Boolean) {
         if (h.isNullOrEmpty()) return
         val s = try { JSONObject(h).optString(key, "") } catch (e: Exception) { "" }
-        // Шаг C2: показываем услышанные слова в строке контроля.
-        // Пустые partial не затирают строку — последние слова остаются видны
-        if (s.isNotBlank()) hypView.text = s.trim()
+        // Шаг C2 (уточнение по заданию): в строку контроля попадают только
+        // ОКОНЧАТЕЛЬНЫЕ результаты распознавания. Промежуточные гипотезы
+        // (которые распознаватель «редактирует на ходу») не показываем,
+        // чтобы в строке были чёткие произнесённые слова, а не черновики
+        if (final && s.isNotBlank()) hypView.text = s.trim()
         val toks = s.trim().split(Regex("\\s+")).map { norm(it) }.filter { it.isNotEmpty() }
         // Если распознаватель пересмотрел фразу и слов стало меньше —
         // уже обработанные слова НЕ подаём заново (раньше это вызывало
@@ -1164,13 +1178,52 @@ class MainActivity : AppCompatActivity() {
 
         box.addView(colors); box.addView(cb)
 
+        // Настройка: номер активной строки от верха экрана (1..6, стандарт 3).
+        // Применяется сразу — лента подъезжает к новому положению
+        val lineLabel = TextView(this)
+        lineLabel.text = "Активная строка сверху: $activeLineFromTop"
+        lineLabel.textSize = 16f
+        val lineSb = SeekBar(this)
+        lineSb.max = 5
+        lineSb.progress = activeLineFromTop - 1
+        lineSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                activeLineFromTop = v + 1
+                lineLabel.text = "Активная строка сверху: $activeLineFromTop"
+                if (fromUser) textView.post { autoScroll() }
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(lineLabel); box.addView(lineSb)
+
+        // Настройка: скорость плавной прокрутки при чтении (1..15, стандарт 3).
+        // Чем больше — тем резвее лента догоняет чтеца
+        val spdLabel = TextView(this)
+        spdLabel.text = "Скорость прокрутки при чтении: $followSpeedStep"
+        spdLabel.textSize = 16f
+        val spdSb = SeekBar(this)
+        spdSb.max = 14
+        spdSb.progress = followSpeedStep - 1
+        spdSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                followSpeedStep = v + 1
+                spdLabel.text = "Скорость прокрутки при чтении: $followSpeedStep"
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(spdLabel); box.addView(spdSb)
+
         AlertDialog.Builder(this)
             .setTitle("Настройки")
             .setView(box)
             .setPositiveButton("Готово") { _, _ ->
                 prefs.edit().putFloat("font", fontSize)
                     .putInt("color", activeColor)
-                    .putBoolean("mirror", mirror).apply()
+                    .putBoolean("mirror", mirror)
+                    .putInt("activeLine", activeLineFromTop)
+                    .putInt("followSpeed", followSpeedStep).apply()
             }
             .show()
     }
