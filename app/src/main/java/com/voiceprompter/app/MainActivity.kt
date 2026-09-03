@@ -2,6 +2,7 @@ package com.voiceprompter.app
 
 import android.Manifest
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -17,6 +18,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.text.Spannable
 import android.text.SpannableString
 import android.text.TextUtils
@@ -41,6 +43,14 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.video.FallbackStrategy
+import androidx.camera.video.MediaStoreOutputOptions
+import androidx.camera.video.Quality
+import androidx.camera.video.QualitySelector
+import androidx.camera.video.Recorder
+import androidx.camera.video.Recording
+import androidx.camera.video.VideoCapture
+import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -50,6 +60,9 @@ import org.vosk.Model
 import org.vosk.Recognizer
 import org.vosk.android.StorageService
 import java.io.IOException
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -143,6 +156,24 @@ class MainActivity : AppCompatActivity() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var useFrontCamera = true
     private lateinit var btnCam: TextView
+
+    // Этап 2 (камера), шаг 2: запись видео. VideoCapture привязывается к
+    // камере вместе с превью; Recording — идущая запись. Видео со звуком
+    // сохраняется в галерею (Movies/VoicePrompter). Во время записи кнопка
+    // ⏺ становится красной и показывает время записи (recTimer)
+    private var videoCapture: VideoCapture<Recorder>? = null
+    private var recording: Recording? = null
+    private var isRecording = false
+    private var recStartMs = 0L
+    private lateinit var btnRec: TextView
+    private val recTimer = object : Runnable {
+        override fun run() {
+            if (!isRecording) return
+            val s = ((System.currentTimeMillis() - recStartMs) / 1000).toInt()
+            btnRec.text = String.format(Locale.US, "⏺%d:%02d", s / 60, s % 60)
+            handler.postDelayed(this, 1000)
+        }
+    }
 
     private var rawText = ""
     private val wordsNorm = ArrayList<String>()
@@ -419,6 +450,8 @@ class MainActivity : AppCompatActivity() {
         btnAuto = makeBtn("АВТО")
         // Этап 2 (камера), шаг 1: кнопка включения превью камеры
         btnCam = makeBtn("🎥")
+        // Этап 2 (камера), шаг 2: кнопка записи видео
+        btnRec = makeBtn("⏺")
         val btnFontMinus = makeBtn("A−")
         val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
@@ -426,6 +459,7 @@ class MainActivity : AppCompatActivity() {
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
         bar.addView(btnJump); bar.addView(btnAuto); bar.addView(btnCam)
+        bar.addView(btnRec)
         bar.addView(btnFontMinus); bar.addView(btnFontPlus)
         bar.addView(btnEdit); bar.addView(btnLibrary); bar.addView(btnSettings)
 
@@ -469,12 +503,19 @@ class MainActivity : AppCompatActivity() {
         // нажатие — переключение фронтальная/задняя камера
         btnCam.setOnClickListener { toggleCamera() }
         btnCam.setOnLongClickListener {
+            // Шаг 2: при смене камеры идущую запись корректно завершаем
+            if (isRecording) {
+                stopRecording()
+                toast("Запись остановлена (смена камеры)")
+            }
             useFrontCamera = !useFrontCamera
             prefs.edit().putBoolean("camFront", useFrontCamera).apply()
             toast(if (useFrontCamera) "Камера: фронтальная" else "Камера: задняя")
             if (cameraOn) bindCamera()
             true
         }
+        // Этап 2 (камера), шаг 2: нажатие на ⏺ — запись видео старт/стоп
+        btnRec.setOnClickListener { toggleRecording() }
         btnJump.setOnClickListener {
             jumpEnabled = !jumpEnabled
             prefs.edit().putBoolean("jump", jumpEnabled).apply()
@@ -1318,8 +1359,8 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Камера (этап 2, шаг 1: превью) ----------
 
-    // Кнопка 🎥: включить/выключить превью камеры. Запись видео появится
-    // на следующем шаге — пока это «зеркало» для кадрирования.
+    // Кнопка 🎥: включить/выключить превью камеры. Пока это «зеркало» для
+    // кадрирования; запись видео — кнопкой ⏺ (шаг 2).
     // Чтобы видеть себя, уменьшите «Прозрачность фона» в настройках:
     // подложка станет прозрачной и под текстом появится изображение камеры
     private fun toggleCamera() {
@@ -1350,27 +1391,120 @@ class MainActivity : AppCompatActivity() {
     }
 
     // Привязка камеры к экрану. bindToLifecycle сам останавливает камеру
-    // при сворачивании приложения и включает при возврате
+    // при сворачивании приложения и включает при возврате.
+    // Шаг 2: вместе с превью привязывается и VideoCapture — готовность
+    // писать видео. Если камера телефона не тянет превью+видео вместе,
+    // привязываем только превью (кнопка ⏺ сообщит, что запись недоступна)
     private fun bindCamera() {
         val provider = cameraProvider ?: return
         try {
+            // Идущую запись нельзя пережить перепривязку — завершаем корректно
+            if (isRecording) stopRecording()
             val preview = Preview.Builder().build()
             preview.setSurfaceProvider(previewView?.surfaceProvider)
             val selector = if (useFrontCamera) CameraSelector.DEFAULT_FRONT_CAMERA
                 else CameraSelector.DEFAULT_BACK_CAMERA
             provider.unbindAll()
-            provider.bindToLifecycle(this, selector, preview)
+            // Шаг 2: качество видео — FullHD, при невозможности — ближайшее
+            val recorder = Recorder.Builder()
+                .setQualitySelector(QualitySelector.from(Quality.FHD,
+                    FallbackStrategy.higherQualityOrLowerThan(Quality.FHD)))
+                .build()
+            val vc = VideoCapture.withOutput(recorder)
+            try {
+                provider.bindToLifecycle(this, selector, preview, vc)
+                videoCapture = vc
+            } catch (e: Exception) {
+                // Резерв: камера не тянет превью+видео — работаем только с превью
+                videoCapture = null
+                provider.unbindAll()
+                provider.bindToLifecycle(this, selector, preview)
+            }
         } catch (e: Exception) {
             toast("Ошибка камеры: " + e.message)
         }
     }
 
     private fun stopCamera() {
+        // Шаг 2: если идёт запись — сначала корректно завершаем её,
+        // чтобы файл сохранился в галерею
+        if (isRecording) stopRecording()
         try { cameraProvider?.unbindAll() } catch (e: Exception) { }
+        videoCapture = null
         previewView?.visibility = View.GONE
         cameraOn = false
         btnCam.setTextColor(Color.parseColor("#EEEEEE"))
         btnCam.background = btnBg(false)
+    }
+
+    // ---------- Запись видео (этап 2, шаг 2) ----------
+
+    // Кнопка ⏺: старт/стоп записи видео со звуком. Файл сохраняется в
+    // галерею: Movies/VoicePrompter/VP_дата_время.mp4. Во время записи
+    // кнопка красная и показывает время (recTimer).
+    // ВНИМАНИЕ (до шага 3): запись и голосовое следование берут звук с
+    // микрофона независимо друг от друга — на части телефонов один из
+    // потоков может получать тишину. Шаг 3 разведёт один поток на оба
+    private fun toggleRecording() {
+        if (isRecording) { stopRecording(); return }
+        if (!cameraOn) { toast("Сначала включите камеру 🎥"); return }
+        val vc = videoCapture
+        if (vc == null) { toast("Запись недоступна: камера не поддерживает видео с превью"); return }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            toast("Нет доступа к микрофону — звук записать не получится")
+            return
+        }
+        val name = "VP_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+        val cv = ContentValues()
+        cv.put(MediaStore.Video.Media.DISPLAY_NAME, name)
+        cv.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+        if (Build.VERSION.SDK_INT >= 29) {
+            cv.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/VoicePrompter")
+        }
+        val opts = MediaStoreOutputOptions.Builder(contentResolver,
+            MediaStore.Video.Media.EXTERNAL_CONTENT_URI)
+            .setContentValues(cv)
+            .build()
+        try {
+            recording = vc.output.prepareRecording(this, opts)
+                .withAudioEnabled()
+                .start(ContextCompat.getMainExecutor(this)) { ev ->
+                    when (ev) {
+                        is VideoRecordEvent.Start -> {
+                            isRecording = true
+                            recStartMs = System.currentTimeMillis()
+                            btnRec.text = "⏺0:00"
+                            btnRec.setTextColor(Color.parseColor("#F44336"))
+                            btnRec.background = btnBg(true)
+                            handler.removeCallbacks(recTimer)
+                            handler.postDelayed(recTimer, 1000)
+                            // Честное предупреждение до шага 3 (см. комментарий выше)
+                            if (isPlaying) toast("Внимание: до шага 3 следование за голосом во время записи может не работать на некоторых телефонах")
+                        }
+                        is VideoRecordEvent.Finalize -> {
+                            isRecording = false
+                            handler.removeCallbacks(recTimer)
+                            btnRec.text = "⏺"
+                            btnRec.setTextColor(Color.parseColor("#EEEEEE"))
+                            btnRec.background = btnBg(false)
+                            recording = null
+                            if (ev.hasError())
+                                toast("Ошибка записи видео (код " + ev.error + ")")
+                            else
+                                toast("Видео сохранено: галерея → Movies/VoicePrompter/" + name)
+                        }
+                    }
+                }
+        } catch (e: Exception) {
+            toast("Ошибка записи: " + e.message)
+        }
+    }
+
+    private fun stopRecording() {
+        // Завершение записи: файл дописывается и приходит событие Finalize,
+        // которое вернёт кнопке обычный вид и покажет, куда сохранено видео
+        try { recording?.stop() } catch (e: Exception) { }
     }
 
     // ---------- Редактор и настройки ----------
@@ -1719,6 +1853,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // Шаг 2: идущую запись завершаем корректно, чтобы файл сохранился
+        stopRecording()
         stopListening()
         stopSmoothScroll()
         stopAuto()
