@@ -141,6 +141,14 @@ class MainActivity : AppCompatActivity() {
     private var pendingIndex = -1
     private var pendingCount = 0
 
+    // Пометка «пропущено» (по заданию, пункт 4): куски текста, через которые
+    // суфлёр перескочил (не были прочитаны), подсвечиваются своим оттенком —
+    // при монтаже сразу видно, что осталось непрочитанным. Храним диапазоны
+    // номеров слов [от, до). Список живёт в рамках сеанса чтения и очищается
+    // при перезапуске ⟲ и смене текста
+    private val skipRanges = ArrayList<Pair<Int, Int>>()
+    private val skipColor = Color.parseColor("#8A5A2A")
+
     // Библиотека сценариев (шаг A1): список хранится в prefs как JSON
     private val scriptNames = ArrayList<String>()
     private val scriptTexts = ArrayList<String>()
@@ -268,6 +276,9 @@ class MainActivity : AppCompatActivity() {
         currentIndex = idx
         missCount = 0; recent.clear()
         confirmNeeded = false; pendingIndex = -1; pendingCount = 0
+        // Пункт 4: пользователь сам перемотал назад — пометки «пропущено»,
+        // оказавшиеся впереди курсора, снимаем (он собирается это прочитать)
+        skipRanges.removeAll { it.first >= currentIndex }
         render()
     }
 
@@ -824,6 +835,8 @@ class MainActivity : AppCompatActivity() {
         }
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
         confirmNeeded = false; pendingIndex = -1; pendingCount = 0
+        // Пункт 4: новый текст — старые пометки «пропущено» не действительны
+        skipRanges.clear()
         render()
     }
 
@@ -833,6 +846,16 @@ class MainActivity : AppCompatActivity() {
             // Цвет «прочитанного» настраивается в Расширенных настройках
             sp.setSpan(ForegroundColorSpan(readColor),
                 0, wordEnds[currentIndex - 1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        // Пометка «пропущено» (по заданию, пункт 4): поверх «прочитанного»
+        // подсвечиваем своим оттенком куски, через которые суфлёр перескочил.
+        // Красим только ту часть диапазона, которая уже позади курсора
+        for (r in skipRanges) {
+            val e = min(r.second, currentIndex)
+            if (r.first < e && r.first < wordStarts.size) {
+                sp.setSpan(ForegroundColorSpan(skipColor),
+                    wordStarts[r.first], wordEnds[e - 1], Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
         }
         textView.text = sp
         textView.post { autoScroll() }
@@ -904,6 +927,10 @@ class MainActivity : AppCompatActivity() {
                 pendingIndex++
                 if (pendingCount >= confirmWordsNeeded) {
                     // нужное число слов текста подряд — это точно чтение
+                    // Пункт 4: если подтверждённое место впереди текущего —
+                    // кусок между ними пропущен, помечаем его своим оттенком
+                    val chainStart = pendingIndex - pendingCount
+                    if (chainStart > currentIndex) skipRanges.add(Pair(currentIndex, chainStart))
                     currentIndex = pendingIndex
                     confirmNeeded = false; pendingIndex = -1; pendingCount = 0; missCount = 0
                     render()
@@ -965,6 +992,9 @@ class MainActivity : AppCompatActivity() {
             }
             if (positions.isNotEmpty()) {
                 val best = positions.minByOrNull { abs(it - currentIndex) }!!
+                // Пункт 4: перескок вперёд — кусок между старым местом и новым
+                // не был прочитан, помечаем его оттенком «пропущено»
+                if (best > currentIndex) skipRanges.add(Pair(currentIndex, best))
                 currentIndex = best + len; missCount = 0
                 confirmNeeded = false; pendingIndex = -1; pendingCount = 0
                 render(); return
@@ -1107,6 +1137,8 @@ class MainActivity : AppCompatActivity() {
     private fun restart() {
         currentIndex = 0; missCount = 0; recent.clear(); partialProcessed = 0
         confirmNeeded = false; pendingIndex = -1; pendingCount = 0
+        // Пункт 4: новый дубль — пометки «пропущено» прошлого дубля убираем
+        skipRanges.clear()
         stopSmoothScroll()
         stopAuto()
         targetScrollY = 0
@@ -1499,6 +1531,42 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(s: SeekBar?) {}
         })
         box.addView(swLabel); box.addView(swSb)
+
+        // Пресеты оформления (по заданию, пункт 3): одна кнопка вместо ручной
+        // настройки нескольких ползунков. Пресет меняет цвет текста, цвет
+        // фона (делает его плотным, 100%) и цвет прочитанного. Остальные
+        // настройки (шрифт, интервал, чувствительность) не трогает.
+        // Строится здесь (когда ползунок прозрачности уже создан), но
+        // вставляется В НАЧАЛО окна настроек
+        val prTitle = TextView(this)
+        prTitle.text = "Пресеты оформления:"
+        prTitle.textSize = 16f
+        val prRow = LinearLayout(this)
+        prRow.orientation = LinearLayout.HORIZONTAL
+        fun presetBtn(name: String, txt: Int, bg: Int, read: Int): Button {
+            val b = Button(this)
+            b.text = name
+            b.setOnClickListener {
+                activeColor = txt; bgColor = bg; bgAlpha = 100; readColor = read
+                textView.setTextColor(activeColor)
+                applyBackground()
+                render()
+                bgaSb.progress = 100 // ползунок прозрачности — к плотному фону
+                toast("Пресет: $name")
+            }
+            return b
+        }
+        prRow.addView(presetBtn("Классика", Color.WHITE, Color.BLACK, Color.parseColor("#555555")))
+        prRow.addView(presetBtn("Жёлтый", Color.parseColor("#FFEB3B"), Color.BLACK, Color.parseColor("#6E6420")))
+        prRow.addView(presetBtn("Зелёный", Color.parseColor("#4CAF50"), Color.BLACK, Color.parseColor("#2A4A2E")))
+        prRow.addView(presetBtn("Синий", Color.WHITE, Color.parseColor("#1A2A4A"), Color.parseColor("#3A5A8A")))
+        // Кнопок четыре — заворачиваем в горизонтальную прокрутку,
+        // чтобы поместились на любом экране
+        val prScroll = HorizontalScrollView(this)
+        prScroll.isHorizontalScrollBarEnabled = false
+        prScroll.addView(prRow)
+        box.addView(prTitle, 0)
+        box.addView(prScroll, 1)
 
         // Настроек стало много — оборачиваем в прокрутку, чтобы всё помещалось
         val scroll = ScrollView(this)
