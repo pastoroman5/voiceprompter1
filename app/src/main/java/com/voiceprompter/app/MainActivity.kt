@@ -6,6 +6,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioDeviceCallback
@@ -144,6 +145,14 @@ class MainActivity : AppCompatActivity() {
     private var confirmWordsNeeded = 3
     private var searchWindow = 15
     private var rootLayout: FrameLayout? = null
+
+    // Ширина текста (по заданию): процент ширины экрана, который занимает
+    // колонка текста (30..100, стандарт 100 — как раньше). Колонка всегда
+    // по центру. Нужно, чтобы на планшете/широком телефоне сузить текст
+    // ровно над объективом камеры — глаза не бегают по широкой строке.
+    // Реализовано боковыми отступами TextView, поэтому жесты (тап/свайп)
+    // продолжают работать по всей ширине экрана
+    private var textWidthPercent = 100
 
     // Выбор микрофона вручную (по заданию): пользователь может указать,
     // с какого микрофона писать звук (встроенный / гарнитура / USB /
@@ -362,6 +371,8 @@ class MainActivity : AppCompatActivity() {
         readColor = prefs.getInt("readColor", Color.parseColor("#555555"))
         confirmWordsNeeded = prefs.getInt("confirmWords", 3)
         searchWindow = prefs.getInt("searchWin", 15)
+        // Ширина текста (по заданию): восстанавливаем сохранённое значение
+        textWidthPercent = prefs.getInt("textWidth", 100)
         // Выбор микрофона (по заданию): восстанавливаем сохранённый выбор
         micPrefType = prefs.getInt("micType", -1)
         micPrefName = prefs.getString("micName", "") ?: ""
@@ -403,7 +414,9 @@ class MainActivity : AppCompatActivity() {
         textView.setTextColor(activeColor)
         textView.textSize = fontSize
         textView.setLineSpacing(0f, lineSpacingStep / 100f)
-        textView.setPadding((16 * d).toInt(), (8 * d).toInt(), (16 * d).toInt(), (500 * d).toInt())
+        // Ширина текста (по заданию): отступы теперь ставит applyTextWidth() —
+        // с учётом настройки «Ширина текста» (при 100% — ровно как раньше)
+        applyTextWidth()
         scrollView.addView(textView)
         column.addView(scrollView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
@@ -608,6 +621,27 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         savePosition()
+    }
+
+    // Ширина текста (по заданию): манифест не пересоздаёт экран при повороте
+    // (configChanges), поэтому при повороте пересчитываем отступы сами —
+    // иначе после поворота колонка была бы не той ширины
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        textView.post { applyTextWidth() }
+    }
+
+    // Ширина текста (по заданию): применяем настройку. При 100% отступы
+    // в точности прежние (16 dp по бокам). При меньших значениях к ним
+    // добавляются равные боковые отступы — колонка текста сужается к
+    // центру экрана. Нижний отступ 500 dp (запас прокрутки) сохранён
+    private fun applyTextWidth() {
+        val d = resources.displayMetrics.density
+        val extra = resources.displayMetrics.widthPixels * (100 - textWidthPercent) / 200
+        textView.setPadding((16 * d).toInt() + extra, (8 * d).toInt(),
+            (16 * d).toInt() + extra, (500 * d).toInt())
+        // Текст переложился по строкам — подъезжаем к активной строке заново
+        textView.post { autoScroll() }
     }
 
     // Расширенные настройки: фон экрана. НАСТОЯЩАЯ прозрачность (по заданию):
@@ -1770,6 +1804,26 @@ class MainActivity : AppCompatActivity() {
         })
         box.addView(lsLabel); box.addView(lsSb)
 
+        // Ширина текста (по заданию): 30..100% ширины экрана, стандарт 100%.
+        // Колонка текста сужается к центру — на планшете/широком экране можно
+        // поставить текст ровно над объективом камеры. Применяется сразу
+        val twLabel = TextView(this)
+        twLabel.text = "Ширина текста: $textWidthPercent%"
+        twLabel.textSize = 16f
+        val twSb = SeekBar(this)
+        twSb.max = 70 // 30..100
+        twSb.progress = textWidthPercent - 30
+        twSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                textWidthPercent = v + 30
+                twLabel.text = "Ширина текста: $textWidthPercent%"
+                if (fromUser) applyTextWidth()
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(twLabel); box.addView(twSb)
+
         // Цвет «прочитанного» (затемнённого) текста: применяется сразу
         val rcLabel = TextView(this)
         rcLabel.text = "Цвет прочитанного:"
@@ -1876,6 +1930,7 @@ class MainActivity : AppCompatActivity() {
                     .putInt("bgAlpha", bgAlpha)
                     .putInt("lineSpacing", lineSpacingStep)
                     .putInt("readColor", readColor)
+                    .putInt("textWidth", textWidthPercent)
                     .putInt("confirmWords", confirmWordsNeeded)
                     .putInt("searchWin", searchWindow).apply()
             }
