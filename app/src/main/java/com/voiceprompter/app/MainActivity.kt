@@ -55,6 +55,18 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
+import android.media.MediaMetadataRetriever
+import android.net.Uri
+import androidx.media3.common.Effect
+import androidx.media3.common.MediaItem
+import androidx.media3.effect.Crop
+import androidx.media3.transformer.Composition
+import androidx.media3.transformer.EditedMediaItem
+import androidx.media3.transformer.Effects
+import androidx.media3.transformer.ExportException
+import androidx.media3.transformer.ExportResult
+import androidx.media3.transformer.Transformer
+import java.io.File
 import androidx.core.content.ContextCompat
 import org.json.JSONArray
 import org.json.JSONObject
@@ -184,6 +196,15 @@ class MainActivity : AppCompatActivity() {
     private var videoCapture: VideoCapture<Recorder>? = null
     private var recording: Recording? = null
     private var isRecording = false
+
+    // Функция «16:9 / 16:9+9:16» (шортс): в режиме 16:9+9:16 после
+    // остановки записи из широкого файла ОФЛАЙН вырезается центральная
+    // полоса 9:16 и сохраняется вторым файлом (..._shorts.mp4)
+    private var shortsMode = false
+    private lateinit var btnAspect: TextView
+    private var frameLeftView: View? = null
+    private var frameRightView: View? = null
+    private var transformer: Transformer? = null
     private var recStartMs = 0L
     private lateinit var btnRec: TextView
     private val recTimer = object : Runnable {
@@ -390,6 +411,8 @@ class MainActivity : AppCompatActivity() {
         micPrefName = prefs.getString("micName", "") ?: ""
         // Этап 2 (камера), шаг 1: какая камера была выбрана в прошлый раз
         useFrontCamera = prefs.getBoolean("camFront", true)
+        // Шортс: восстанавливаем сохранённый режим 16:9 / 16:9+9:16
+        shortsMode = prefs.getBoolean("shortsMode", false)
         loadScripts()
         rawText = scriptTexts[currentScript]
 
@@ -487,6 +510,9 @@ class MainActivity : AppCompatActivity() {
         btnCam = makeBtn("🎥")
         // Этап 2 (камера), шаг 2: кнопка записи видео
         btnRec = makeBtn("⏺")
+        // Шортс: кнопка режима 16:9 / 16:9+9:16
+        btnAspect = makeBtn("16:9")
+        updateAspectBtn()
         val btnFontMinus = makeBtn("A−")
         val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
@@ -494,7 +520,7 @@ class MainActivity : AppCompatActivity() {
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
         bar.addView(btnJump); bar.addView(btnAuto); bar.addView(btnCam)
-        bar.addView(btnRec)
+        bar.addView(btnRec); bar.addView(btnAspect)
         bar.addView(btnFontMinus); bar.addView(btnFontPlus)
         bar.addView(btnEdit); bar.addView(btnLibrary); bar.addView(btnSettings)
 
@@ -514,6 +540,19 @@ class MainActivity : AppCompatActivity() {
         val cdlp = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.WRAP_CONTENT,
             FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+        // Шортс: две вертикальные линии — границы кадра 9:16 (видны
+        // только при включённой камере в режиме 16:9+9:16)
+        val frameL = View(this)
+        frameL.setBackgroundColor(Color.parseColor("#FFEB3B"))
+        frameL.visibility = View.GONE
+        val frameR = View(this)
+        frameR.setBackgroundColor(Color.parseColor("#FFEB3B"))
+        frameR.visibility = View.GONE
+        frameLeftView = frameL
+        frameRightView = frameR
+        root.addView(frameL)
+        root.addView(frameR)
+
         root.addView(countdownView, cdlp)
 
         setContentView(root)
@@ -551,6 +590,17 @@ class MainActivity : AppCompatActivity() {
         }
         // Этап 2 (камера), шаг 2: нажатие на ⏺ — запись видео старт/стоп
         btnRec.setOnClickListener { toggleRecording() }
+        // Шортс: переключение режима 16:9 / 16:9+9:16
+        btnAspect.setOnClickListener {
+            shortsMode = !shortsMode
+            prefs.edit().putBoolean("shortsMode", shortsMode).apply()
+            updateAspectBtn()
+            updateShortsFrame()
+            toast(if (shortsMode)
+                "Режим 16:9+9:16: после остановки записи будет вырезан второй файл — вертикальный шортс 9:16 (офлайн)"
+            else
+                "Режим 16:9: записывается только широкий файл")
+        }
         btnJump.setOnClickListener {
             jumpEnabled = !jumpEnabled
             prefs.edit().putBoolean("jump", jumpEnabled).apply()
@@ -641,6 +691,8 @@ class MainActivity : AppCompatActivity() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         textView.post { applyTextWidth() }
+        // Шортс: при повороте пересчитываем положение рамки 9:16
+        updateShortsFrame()
     }
 
     // Ширина текста (по заданию): применяем настройку. При 100% отступы
@@ -1474,6 +1526,7 @@ class MainActivity : AppCompatActivity() {
                 cameraOn = true
                 btnCam.setTextColor(Color.parseColor("#4CAF50"))
                 btnCam.background = btnBg(true)
+                updateShortsFrame()
                 if (bgAlpha > 50) toast("Камера включена. Чтобы видеть себя, уменьшите «Прозрачность фона» в ⚙")
             } catch (e: Exception) {
                 toast("Ошибка камеры: " + e.message)
@@ -1526,6 +1579,7 @@ class MainActivity : AppCompatActivity() {
         cameraOn = false
         btnCam.setTextColor(Color.parseColor("#EEEEEE"))
         btnCam.background = btnBg(false)
+        updateShortsFrame()
     }
 
     // ---------- Запись видео (этап 2, шаг 2) ----------
@@ -1585,8 +1639,11 @@ class MainActivity : AppCompatActivity() {
                             recording = null
                             if (ev.hasError())
                                 toast("Ошибка записи видео (код " + ev.error + ")")
-                            else
+                            else {
                                 toast("Видео сохранено: галерея → Movies/VoicePrompter/" + name)
+                                // Шортс: в режиме 16:9+9:16 вырезаем вертикальный файл
+                                if (shortsMode) makeShorts(ev.outputResults.outputUri, name)
+                            }
                         }
                     }
                 }
@@ -1599,6 +1656,110 @@ class MainActivity : AppCompatActivity() {
         // Завершение записи: файл дописывается и приходит событие Finalize,
         // которое вернёт кнопке обычный вид и покажет, куда сохранено видео
         try { recording?.stop() } catch (e: Exception) { }
+    }
+
+    // ---------- Шортс 9:16 (функция «16:9 / 16:9+9:16») ----------
+
+    // Кнопка режима: зелёная — после записи будет вырезан шортс
+    private fun updateAspectBtn() {
+        btnAspect.text = if (shortsMode) "16:9+9:16" else "16:9"
+        btnAspect.setTextColor(if (shortsMode) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
+        btnAspect.background = btnBg(shortsMode)
+    }
+
+    // Рамка границ вертикального кадра: две жёлтые линии по центру экрана.
+    // Ширина области = высота экрана * 9/16. Если экран сам вертикальный
+    // (область шире экрана) — рамка не нужна и скрывается
+    private fun updateShortsFrame() {
+        val l = frameLeftView ?: return
+        val r = frameRightView ?: return
+        val root = rootLayout ?: return
+        root.post {
+            val w = root.width
+            val h = root.height
+            val frameW = (h * 9f / 16f).toInt()
+            if (!cameraOn || !shortsMode || w <= 0 || h <= 0 || frameW >= w) {
+                l.visibility = View.GONE
+                r.visibility = View.GONE
+                return@post
+            }
+            val d = resources.displayMetrics.density
+            val left = (w - frameW) / 2
+            val lpL = FrameLayout.LayoutParams((2 * d).toInt(), FrameLayout.LayoutParams.MATCH_PARENT)
+            lpL.leftMargin = left
+            l.layoutParams = lpL
+            val lpR = FrameLayout.LayoutParams((2 * d).toInt(), FrameLayout.LayoutParams.MATCH_PARENT)
+            lpR.leftMargin = left + frameW
+            r.layoutParams = lpR
+            l.visibility = View.VISIBLE
+            r.visibility = View.VISIBLE
+        }
+    }
+
+    // Вырезка шортса: из записанного файла берётся центральная полоса 9:16
+    // и перекодируется библиотекой Media3 Transformer. Полностью ОФЛАЙН —
+    // интернет не используется, всё считает процессор телефона
+    private fun makeShorts(uri: Uri?, name: String) {
+        if (uri == null) { toast("Шортс: не удалось найти записанный файл"); return }
+        try {
+            val mmr = MediaMetadataRetriever()
+            mmr.setDataSource(this, uri)
+            var w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+            var h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+            val rot = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)?.toIntOrNull() ?: 0
+            mmr.release()
+            if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
+            if (w <= 0 || h <= 0) { toast("Шортс: не удалось прочитать размеры видео"); return }
+            // Доля ширины кадра, которую занимает вертикальная полоса 9:16
+            val frac = (h * 9f / 16f) / w
+            if (frac >= 1f) { toast("Шортс: видео уже вертикальное, вырезка не нужна"); return }
+            val crop = Crop(-frac, frac, -1f, 1f)
+            val item = EditedMediaItem.Builder(MediaItem.fromUri(uri))
+                .setEffects(Effects(emptyList(), listOf<Effect>(crop)))
+                .build()
+            val outName = name.removeSuffix(".mp4") + "_shorts.mp4"
+            val tmp = File(cacheDir, outName)
+            val t = Transformer.Builder(this)
+                .addListener(object : Transformer.Listener {
+                    override fun onCompleted(composition: Composition, exportResult: ExportResult) {
+                        transformer = null
+                        saveShortsToGallery(tmp, outName)
+                    }
+                    override fun onError(composition: Composition, exportResult: ExportResult,
+                                         exportException: ExportException) {
+                        transformer = null
+                        tmp.delete()
+                        toast("Шортс: ошибка вырезки — " + exportException.message)
+                    }
+                })
+                .build()
+            transformer = t
+            toast("Вырезаю шортс 9:16… Не закрывайте приложение до сообщения о готовности")
+            t.start(item, tmp.absolutePath)
+        } catch (e: Exception) {
+            toast("Шортс: ошибка — " + e.message)
+        }
+    }
+
+    // Готовый шортс переносим из временной папки в галерею
+    private fun saveShortsToGallery(tmp: File, outName: String) {
+        try {
+            val cv = ContentValues()
+            cv.put(MediaStore.Video.Media.DISPLAY_NAME, outName)
+            cv.put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            if (Build.VERSION.SDK_INT >= 29) {
+                cv.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/VoicePrompter")
+            }
+            val outUri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv)
+            if (outUri == null) { toast("Шортс: не удалось сохранить в галерею"); return }
+            contentResolver.openOutputStream(outUri)?.use { out ->
+                tmp.inputStream().use { input -> input.copyTo(out) }
+            }
+            tmp.delete()
+            toast("Шортс сохранён: галерея → Movies/VoicePrompter/" + outName)
+        } catch (e: Exception) {
+            toast("Шортс: ошибка сохранения — " + e.message)
+        }
     }
 
     // ---------- Редактор и настройки ----------
