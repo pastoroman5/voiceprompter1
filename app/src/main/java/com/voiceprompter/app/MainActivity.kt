@@ -5,6 +5,7 @@ import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.Color
@@ -355,6 +356,17 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // Поворот экрана (по заданию): у окна прозрачная тема (TransparentTheme),
+        // а прозрачные окна Android сам НЕ поворачивает — они наследуют
+        // ориентацию того, что под ними (рабочего стола, который обычно
+        // закреплён вертикально). Поэтому явно просим поворот по датчику.
+        // FULL_USER уважает системный переключатель автоповорота: если
+        // автоповорот в шторке выключен — приложение тоже не вертится.
+        // try/catch — страховка для Android 8.0, где у прозрачных окон
+        // такой запрос мог вызывать ошибку
+        try {
+            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_USER
+        } catch (e: Exception) { }
         prefs = getSharedPreferences("vp", MODE_PRIVATE)
         jumpEnabled = prefs.getBoolean("jump", true)
         fontSize = prefs.getFloat("font", 34f)
