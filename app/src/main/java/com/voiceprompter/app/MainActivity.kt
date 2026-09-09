@@ -136,9 +136,9 @@ class MainActivity : AppCompatActivity() {
     private var mirror = false
 
     // Настройки (добавлено по заданию): номер активной строки сверху
-    // (стандарт 2 — над ней одна затемнённая строка) и скорость плавной
+    // (стандарт 3 — над ней две затемнённые строки) и скорость плавной
     // прокрутки при чтении (стандарт 3, внутри используется как 0.03)
-    private var activeLineFromTop = 2
+    private var activeLineFromTop = 3
     private var followSpeedStep = 3
 
     // Расширенные настройки (добавлено по заданию):
@@ -197,15 +197,15 @@ class MainActivity : AppCompatActivity() {
     private var recording: Recording? = null
     private var isRecording = false
 
-    // Форматы видео (одна кнопка, перебор по кругу): 0 — «16:9» (только
-    // широкий файл), 1 — «16:9+9:16» (плюс вертикальный шортс 9:16),
-    // 2 — «16:9+6:19» (плюс узкий вертикальный файл 6:19). Вырезка идёт
-    // ОФЛАЙН после остановки записи, вторым файлом (..._shorts.mp4)
-    private var videoFormat = 0
-    private val formatLabels = arrayOf("16:9", "16:9+9:16", "16:9+6:19")
-    // Пропорции вертикального кадра каждого формата (0 — вырезки нет)
-    private val formatW = intArrayOf(0, 9, 6)
-    private val formatH = intArrayOf(1, 16, 19)
+    // Функция «16:9 / 16:9+9:16» (шортс): в режиме 16:9+9:16 после
+    // остановки записи из широкого файла ОФЛАЙН вырезается центральная
+    // полоса 9:16 и сохраняется вторым файлом (..._shorts.mp4)
+    private var shortsMode = false
+    // Кнопка «9:16» (по заданию): режим ТОЛЬКО вертикального видео — после
+    // остановки записи из широкого файла вырезается вертикальный 9:16,
+    // а широкий оригинал удаляется из галереи (остаётся один файл-шортс)
+    private var verticalOnly = false
+    private lateinit var btnVertical: TextView
     private lateinit var btnAspect: TextView
     private var frameLeftView: View? = null
     private var frameRightView: View? = null
@@ -400,7 +400,7 @@ class MainActivity : AppCompatActivity() {
         mirror = prefs.getBoolean("mirror", false)
         autoMode = prefs.getBoolean("autoMode", false)
         autoSpeed = prefs.getInt("autoSpeed", 30)
-        activeLineFromTop = prefs.getInt("activeLine", 2)
+        activeLineFromTop = prefs.getInt("activeLine", 3)
         followSpeedStep = prefs.getInt("followSpeed", 3)
         // Расширенные настройки
         bgColor = prefs.getInt("bgColor", Color.BLACK)
@@ -416,9 +416,12 @@ class MainActivity : AppCompatActivity() {
         micPrefName = prefs.getString("micName", "") ?: ""
         // Этап 2 (камера), шаг 1: какая камера была выбрана в прошлый раз
         useFrontCamera = prefs.getBoolean("camFront", true)
-        // Форматы: восстанавливаем сохранённый формат (по умолчанию 16:9)
-        videoFormat = prefs.getInt("videoFormat", 0)
-        if (videoFormat < 0 || videoFormat >= formatLabels.size) videoFormat = 0
+        // Шортс: восстанавливаем сохранённый режим 16:9 / 16:9+9:16
+        shortsMode = prefs.getBoolean("shortsMode", false)
+        // 9:16: восстанавливаем режим «только вертикальное видео»;
+        // одновременно с 16:9+9:16 он работать не может
+        verticalOnly = prefs.getBoolean("verticalOnly", false)
+        if (verticalOnly) shortsMode = false
         loadScripts()
         rawText = scriptTexts[currentScript]
 
@@ -519,6 +522,9 @@ class MainActivity : AppCompatActivity() {
         // Шортс: кнопка режима 16:9 / 16:9+9:16
         btnAspect = makeBtn("16:9")
         updateAspectBtn()
+        // 9:16: кнопка режима «только вертикальное видео»
+        btnVertical = makeBtn("9:16")
+        updateVerticalBtn()
         val btnFontMinus = makeBtn("A−")
         val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
@@ -526,7 +532,7 @@ class MainActivity : AppCompatActivity() {
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
         bar.addView(btnJump); bar.addView(btnAuto); bar.addView(btnCam)
-        bar.addView(btnRec); bar.addView(btnAspect)
+        bar.addView(btnRec); bar.addView(btnAspect); bar.addView(btnVertical)
         bar.addView(btnFontMinus); bar.addView(btnFontPlus)
         bar.addView(btnEdit); bar.addView(btnLibrary); bar.addView(btnSettings)
 
@@ -596,16 +602,32 @@ class MainActivity : AppCompatActivity() {
         }
         // Этап 2 (камера), шаг 2: нажатие на ⏺ — запись видео старт/стоп
         btnRec.setOnClickListener { toggleRecording() }
-        // Форматы: одна кнопка перебирает форматы видео по кругу
+        // Шортс: переключение режима 16:9 / 16:9+9:16
         btnAspect.setOnClickListener {
-            videoFormat = (videoFormat + 1) % formatLabels.size
-            prefs.edit().putInt("videoFormat", videoFormat).apply()
+            shortsMode = !shortsMode
+            // Режимы 16:9+9:16 и 9:16 несовместимы — включение одного гасит другой
+            if (shortsMode && verticalOnly) { verticalOnly = false; updateVerticalBtn() }
+            prefs.edit().putBoolean("shortsMode", shortsMode)
+                .putBoolean("verticalOnly", verticalOnly).apply()
             updateAspectBtn()
             updateShortsFrame()
-            toast(if (videoFormat == 0)
-                "Режим 16:9: записывается только широкий файл"
+            toast(if (shortsMode)
+                "Режим 16:9+9:16: после остановки записи будет вырезан второй файл — вертикальный шортс 9:16 (офлайн)"
             else
-                "Режим " + formatLabels[videoFormat] + ": после остановки записи будет вырезан второй файл — вертикальный " + formatW[videoFormat] + ":" + formatH[videoFormat] + " (офлайн)")
+                "Режим 16:9: записывается только широкий файл")
+        }
+        // 9:16: только вертикальное видео — широкий файл после вырезки удаляется
+        btnVertical.setOnClickListener {
+            verticalOnly = !verticalOnly
+            if (verticalOnly && shortsMode) { shortsMode = false; updateAspectBtn() }
+            prefs.edit().putBoolean("verticalOnly", verticalOnly)
+                .putBoolean("shortsMode", shortsMode).apply()
+            updateVerticalBtn()
+            updateShortsFrame()
+            toast(if (verticalOnly)
+                "Режим 9:16: после остановки записи останется ТОЛЬКО вертикальный файл — широкий оригинал будет удалён"
+            else
+                "Режим 9:16 выключен")
         }
         btnJump.setOnClickListener {
             jumpEnabled = !jumpEnabled
@@ -1646,9 +1668,15 @@ class MainActivity : AppCompatActivity() {
                             if (ev.hasError())
                                 toast("Ошибка записи видео (код " + ev.error + ")")
                             else {
-                                toast("Видео сохранено: галерея → Movies/VoicePrompter/" + name)
-                                // Форматы: если выбран формат с вырезкой — режем вертикальный файл
-                                if (videoFormat != 0) makeShorts(ev.outputResults.outputUri, name)
+                                if (verticalOnly) {
+                                    // 9:16: режем вертикальный файл, широкий потом удалим
+                                    toast("Запись готова. Вырезаю вертикальный файл 9:16…")
+                                    makeShorts(ev.outputResults.outputUri, name, true)
+                                } else {
+                                    toast("Видео сохранено: галерея → Movies/VoicePrompter/" + name)
+                                    // Шортс: в режиме 16:9+9:16 вырезаем вертикальный файл
+                                    if (shortsMode) makeShorts(ev.outputResults.outputUri, name, false)
+                                }
                             }
                         }
                     }
@@ -1666,12 +1694,17 @@ class MainActivity : AppCompatActivity() {
 
     // ---------- Шортс 9:16 (функция «16:9 / 16:9+9:16») ----------
 
-    // Кнопка формата: зелёная — после записи будет вырезан вертикальный файл
+    // Кнопка режима: зелёная — после записи будет вырезан шортс
     private fun updateAspectBtn() {
-        val on = videoFormat != 0
-        btnAspect.text = formatLabels[videoFormat]
-        btnAspect.setTextColor(if (on) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
-        btnAspect.background = btnBg(on)
+        btnAspect.text = if (shortsMode) "16:9+9:16" else "16:9"
+        btnAspect.setTextColor(if (shortsMode) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
+        btnAspect.background = btnBg(shortsMode)
+    }
+
+    // Кнопка 9:16: зелёная — останется только вертикальный файл
+    private fun updateVerticalBtn() {
+        btnVertical.setTextColor(if (verticalOnly) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
+        btnVertical.background = btnBg(verticalOnly)
     }
 
     // Рамка границ вертикального кадра: две жёлтые линии по центру экрана.
@@ -1684,9 +1717,8 @@ class MainActivity : AppCompatActivity() {
         root.post {
             val w = root.width
             val h = root.height
-            val on = videoFormat != 0
-            val frameW = if (on) (h * formatW[videoFormat].toFloat() / formatH[videoFormat]).toInt() else 0
-            if (!cameraOn || !on || w <= 0 || h <= 0 || frameW >= w) {
+            val frameW = (h * 9f / 16f).toInt()
+            if (!cameraOn || !(shortsMode || verticalOnly) || w <= 0 || h <= 0 || frameW >= w) {
                 l.visibility = View.GONE
                 r.visibility = View.GONE
                 return@post
@@ -1707,8 +1739,11 @@ class MainActivity : AppCompatActivity() {
     // Вырезка шортса: из записанного файла берётся центральная полоса 9:16
     // и перекодируется библиотекой Media3 Transformer. Полностью ОФЛАЙН —
     // интернет не используется, всё считает процессор телефона
-    private fun makeShorts(uri: Uri?, name: String) {
+    // deleteOriginal = true (режим 9:16): после успешной вырезки широкий
+    // оригинал удаляется из галереи — остаётся только вертикальный файл
+    private fun makeShorts(uri: Uri?, name: String, deleteOriginal: Boolean) {
         if (uri == null) { toast("Шортс: не удалось найти записанный файл"); return }
+        val srcUri: Uri = uri
         try {
             val mmr = MediaMetadataRetriever()
             mmr.setDataSource(this, uri)
@@ -1718,8 +1753,8 @@ class MainActivity : AppCompatActivity() {
             mmr.release()
             if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
             if (w <= 0 || h <= 0) { toast("Шортс: не удалось прочитать размеры видео"); return }
-            // Доля ширины кадра, которую занимает вертикальная полоса формата
-            val frac = (h * formatW[videoFormat].toFloat() / formatH[videoFormat]) / w
+            // Доля ширины кадра, которую занимает вертикальная полоса 9:16
+            val frac = (h * 9f / 16f) / w
             if (frac >= 1f) { toast("Шортс: видео уже вертикальное, вырезка не нужна"); return }
             val crop = Crop(-frac, frac, -1f, 1f)
             val item = EditedMediaItem.Builder(MediaItem.fromUri(uri))
@@ -1732,6 +1767,10 @@ class MainActivity : AppCompatActivity() {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                         transformer = null
                         saveShortsToGallery(tmp, outName)
+                        // 9:16: вертикальный файл готов — удаляем широкий оригинал
+                        if (deleteOriginal) {
+                            try { contentResolver.delete(srcUri, null, null) } catch (e: Exception) { }
+                        }
                     }
                     override fun onError(composition: Composition, exportResult: ExportResult,
                                          exportException: ExportException) {
@@ -1742,7 +1781,7 @@ class MainActivity : AppCompatActivity() {
                 })
                 .build()
             transformer = t
-            toast("Вырезаю вертикальный файл " + formatW[videoFormat] + ":" + formatH[videoFormat] + "… Не закрывайте приложение до сообщения о готовности")
+            toast("Вырезаю шортс 9:16… Не закрывайте приложение до сообщения о готовности")
             t.start(item, tmp.absolutePath)
         } catch (e: Exception) {
             toast("Шортс: ошибка — " + e.message)
