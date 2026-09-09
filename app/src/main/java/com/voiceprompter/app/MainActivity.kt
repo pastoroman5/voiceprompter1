@@ -1149,51 +1149,54 @@ class MainActivity : AppCompatActivity() {
 
         // Режим подтверждения: были посторонние слова, суфлёр стоит на месте
         // и сдвинется только после НАСТРОЕННОГО числа слов текста подряд
-        // (стандарт 3, меняется в Расширенных настройках)
+        // (стандарт 3, меняется в Расширенных настройках).
+        // ИСПРАВЛЕНИЕ (по заданию): возврат к чтению теперь ловится ЦЕПОЧКОЙ
+        // из ПОСЛЕДНИХ услышанных слов, а не по одному слову. Раньше цепочка
+        // строилась пословно и обнулялась от любой ослышки распознавания —
+        // из-за этого возврат к тексту часто не засчитывался. Теперь на
+        // каждом новом слове берём последние N услышанных слов и ищем их
+        // ПОДРЯД в тексте вокруг курсора: нашлись — это точно чтение.
+        // Посторонняя речь текст по-прежнему не двигает: случайное
+        // совпадение сразу N слов подряд практически исключено.
+        // Кнопка 🔀 и «Окно поиска» работают как раньше: с перескоками ищем
+        // до searchWindow слов вперёд и назад, без них — только чуть вперёд
         if (confirmNeeded) {
-            if (pendingIndex in 0 until wordsNorm.size && wordMatch(wordsNorm[pendingIndex], w)) {
-                pendingCount++
-                pendingIndex++
-                if (pendingCount >= confirmWordsNeeded) {
-                    // нужное число слов текста подряд — это точно чтение
-                    // Пункт 4: если подтверждённое место впереди текущего —
-                    // кусок между ними пропущен, помечаем его своим оттенком
-                    val chainStart = pendingIndex - pendingCount
-                    if (chainStart > currentIndex) skipRanges.add(Pair(currentIndex, chainStart))
-                    currentIndex = pendingIndex
-                    confirmNeeded = false; pendingIndex = -1; pendingCount = 0; missCount = 0
-                    render()
-                }
-                return
-            }
-            // Цепочка оборвалась — пробуем начать новую с этого слова.
-            // Ищем ВПЕРЁД до searchWindow слов (пока подтверждение срывалось,
-            // чтец мог уйти вперёд от маркера) и НАЗАД до searchWindow слов —
-            // чтобы можно было вернуться к началу фразы и продолжить оттуда.
-            // Окно настраивается в Расширенных настройках (стандарт 15).
-            // ИСПРАВЛЕНИЕ (по заданию): широкое окно поиска — это тоже
-            // перескок, поэтому оно работает ТОЛЬКО при включённой кнопке 🔀.
-            // При выключенных перескоках ищем строго рядом с курсором
-            // (до 3 слов вперёд, как в обычном движении) и назад не ищем —
-            // суфлёр идёт по порядку, как и обещает подсказка кнопки
-            pendingIndex = -1; pendingCount = 0
+            val need = min(confirmWordsNeeded, recent.size)
+            val seq = recent.takeLast(need)
             var found = -1
-            val fwdEnd = if (jumpEnabled) min(currentIndex + searchWindow, wordsNorm.size)
-                else min(currentIndex + 3, wordsNorm.size)
-            for (j in currentIndex until fwdEnd) {
-                if (wordMatch(wordsNorm[j], w)) { found = j; break }
+            // Сначала вперёд от курсора (чтец обычно продолжает дальше)
+            val fwdEnd = (if (jumpEnabled) min(currentIndex + searchWindow, wordsNorm.size)
+                else min(currentIndex + 3, wordsNorm.size)) - need
+            var j = currentIndex
+            while (j <= fwdEnd) {
+                var ok = true
+                for (k in 0 until need) {
+                    if (!wordMatch(wordsNorm[j + k], seq[k])) { ok = false; break }
+                }
+                if (ok) { found = j; break }
+                j++
             }
+            // Потом назад (чтец вернулся к началу фразы) — только при 🔀
             if (found < 0 && jumpEnabled) {
                 val backLimit = max(0, currentIndex - searchWindow)
-                var j = min(currentIndex, wordsNorm.size) - 1
+                j = currentIndex - 1
                 while (j >= backLimit) {
-                    if (wordMatch(wordsNorm[j], w)) { found = j; break }
+                    var ok = true
+                    for (k in 0 until need) {
+                        if (j + k >= wordsNorm.size || !wordMatch(wordsNorm[j + k], seq[k])) { ok = false; break }
+                    }
+                    if (ok) { found = j; break }
                     j--
                 }
             }
             if (found >= 0) {
-                pendingIndex = found + 1
-                pendingCount = 1
+                // Цепочка слов текста найдена — это точно чтение.
+                // Пункт 4: если место впереди текущего — кусок между ними
+                // пропущен, помечаем его оттенком «пропущено»
+                if (found > currentIndex) skipRanges.add(Pair(currentIndex, found))
+                currentIndex = found + need
+                confirmNeeded = false; pendingIndex = -1; pendingCount = 0; missCount = 0
+                render()
             } else {
                 missCount++
                 if (jumpEnabled && missCount >= 3) tryJump()
