@@ -30,16 +30,6 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon
 
-      - name: Re-sign APK v2+v3 for Android 16
-        run: |
-          keytool -genkeypair -keystore ci.keystore -storepass android -keypass android \
-            -alias ci -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=VoicePrompter"
-          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
-          $BT/zipalign -f -p 4 app/build/outputs/apk/debug/app-debug.apk app/aligned.apk
-          $BT/apksigner sign --ks ci.keystore --ks-pass pass:android --key-pass pass:android \
-            --out app/build/outputs/apk/debug/app-debug.apk app/aligned.apk
-          $BT/apksigner verify --print-certs app/build/outputs/apk/debug/app-debug.apk
-
       - uses: actions/upload-artifact@v4
         with:
           name: VoicePrompter-APK
