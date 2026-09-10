@@ -201,11 +201,6 @@ class MainActivity : AppCompatActivity() {
     // остановки записи из широкого файла ОФЛАЙН вырезается центральная
     // полоса 9:16 и сохраняется вторым файлом (..._shorts.mp4)
     private var shortsMode = false
-    // Кнопка «9:16» (по заданию): режим ТОЛЬКО вертикального видео — после
-    // остановки записи из широкого файла вырезается вертикальный 9:16,
-    // а широкий оригинал удаляется из галереи (остаётся один файл-шортс)
-    private var verticalOnly = false
-    private lateinit var btnVertical: TextView
     private lateinit var btnAspect: TextView
     private var frameLeftView: View? = null
     private var frameRightView: View? = null
@@ -418,10 +413,6 @@ class MainActivity : AppCompatActivity() {
         useFrontCamera = prefs.getBoolean("camFront", true)
         // Шортс: восстанавливаем сохранённый режим 16:9 / 16:9+9:16
         shortsMode = prefs.getBoolean("shortsMode", false)
-        // 9:16: восстанавливаем режим «только вертикальное видео»;
-        // одновременно с 16:9+9:16 он работать не может
-        verticalOnly = prefs.getBoolean("verticalOnly", false)
-        if (verticalOnly) shortsMode = false
         loadScripts()
         rawText = scriptTexts[currentScript]
 
@@ -522,9 +513,6 @@ class MainActivity : AppCompatActivity() {
         // Шортс: кнопка режима 16:9 / 16:9+9:16
         btnAspect = makeBtn("16:9")
         updateAspectBtn()
-        // 9:16: кнопка режима «только вертикальное видео»
-        btnVertical = makeBtn("9:16")
-        updateVerticalBtn()
         val btnFontMinus = makeBtn("A−")
         val btnFontPlus = makeBtn("A+")
         val btnEdit = makeBtn("✎")
@@ -532,7 +520,7 @@ class MainActivity : AppCompatActivity() {
         val btnSettings = makeBtn("⚙")
         bar.addView(micDot); bar.addView(btnPlay); bar.addView(btnRestart)
         bar.addView(btnJump); bar.addView(btnAuto); bar.addView(btnCam)
-        bar.addView(btnRec); bar.addView(btnAspect); bar.addView(btnVertical)
+        bar.addView(btnRec); bar.addView(btnAspect)
         bar.addView(btnFontMinus); bar.addView(btnFontPlus)
         bar.addView(btnEdit); bar.addView(btnLibrary); bar.addView(btnSettings)
 
@@ -605,29 +593,13 @@ class MainActivity : AppCompatActivity() {
         // Шортс: переключение режима 16:9 / 16:9+9:16
         btnAspect.setOnClickListener {
             shortsMode = !shortsMode
-            // Режимы 16:9+9:16 и 9:16 несовместимы — включение одного гасит другой
-            if (shortsMode && verticalOnly) { verticalOnly = false; updateVerticalBtn() }
-            prefs.edit().putBoolean("shortsMode", shortsMode)
-                .putBoolean("verticalOnly", verticalOnly).apply()
+            prefs.edit().putBoolean("shortsMode", shortsMode).apply()
             updateAspectBtn()
             updateShortsFrame()
             toast(if (shortsMode)
                 "Режим 16:9+9:16: после остановки записи будет вырезан второй файл — вертикальный шортс 9:16 (офлайн)"
             else
                 "Режим 16:9: записывается только широкий файл")
-        }
-        // 9:16: только вертикальное видео — широкий файл после вырезки удаляется
-        btnVertical.setOnClickListener {
-            verticalOnly = !verticalOnly
-            if (verticalOnly && shortsMode) { shortsMode = false; updateAspectBtn() }
-            prefs.edit().putBoolean("verticalOnly", verticalOnly)
-                .putBoolean("shortsMode", shortsMode).apply()
-            updateVerticalBtn()
-            updateShortsFrame()
-            toast(if (verticalOnly)
-                "Режим 9:16: после остановки записи останется ТОЛЬКО вертикальный файл — широкий оригинал будет удалён"
-            else
-                "Режим 9:16 выключен")
         }
         btnJump.setOnClickListener {
             jumpEnabled = !jumpEnabled
@@ -1149,54 +1121,51 @@ class MainActivity : AppCompatActivity() {
 
         // Режим подтверждения: были посторонние слова, суфлёр стоит на месте
         // и сдвинется только после НАСТРОЕННОГО числа слов текста подряд
-        // (стандарт 3, меняется в Расширенных настройках).
-        // ИСПРАВЛЕНИЕ (по заданию): возврат к чтению теперь ловится ЦЕПОЧКОЙ
-        // из ПОСЛЕДНИХ услышанных слов, а не по одному слову. Раньше цепочка
-        // строилась пословно и обнулялась от любой ослышки распознавания —
-        // из-за этого возврат к тексту часто не засчитывался. Теперь на
-        // каждом новом слове берём последние N услышанных слов и ищем их
-        // ПОДРЯД в тексте вокруг курсора: нашлись — это точно чтение.
-        // Посторонняя речь текст по-прежнему не двигает: случайное
-        // совпадение сразу N слов подряд практически исключено.
-        // Кнопка 🔀 и «Окно поиска» работают как раньше: с перескоками ищем
-        // до searchWindow слов вперёд и назад, без них — только чуть вперёд
+        // (стандарт 3, меняется в Расширенных настройках)
         if (confirmNeeded) {
-            val need = min(confirmWordsNeeded, recent.size)
-            val seq = recent.takeLast(need)
-            var found = -1
-            // Сначала вперёд от курсора (чтец обычно продолжает дальше)
-            val fwdEnd = (if (jumpEnabled) min(currentIndex + searchWindow, wordsNorm.size)
-                else min(currentIndex + 3, wordsNorm.size)) - need
-            var j = currentIndex
-            while (j <= fwdEnd) {
-                var ok = true
-                for (k in 0 until need) {
-                    if (!wordMatch(wordsNorm[j + k], seq[k])) { ok = false; break }
+            if (pendingIndex in 0 until wordsNorm.size && wordMatch(wordsNorm[pendingIndex], w)) {
+                pendingCount++
+                pendingIndex++
+                if (pendingCount >= confirmWordsNeeded) {
+                    // нужное число слов текста подряд — это точно чтение
+                    // Пункт 4: если подтверждённое место впереди текущего —
+                    // кусок между ними пропущен, помечаем его своим оттенком
+                    val chainStart = pendingIndex - pendingCount
+                    if (chainStart > currentIndex) skipRanges.add(Pair(currentIndex, chainStart))
+                    currentIndex = pendingIndex
+                    confirmNeeded = false; pendingIndex = -1; pendingCount = 0; missCount = 0
+                    render()
                 }
-                if (ok) { found = j; break }
-                j++
+                return
             }
-            // Потом назад (чтец вернулся к началу фразы) — только при 🔀
+            // Цепочка оборвалась — пробуем начать новую с этого слова.
+            // Ищем ВПЕРЁД до searchWindow слов (пока подтверждение срывалось,
+            // чтец мог уйти вперёд от маркера) и НАЗАД до searchWindow слов —
+            // чтобы можно было вернуться к началу фразы и продолжить оттуда.
+            // Окно настраивается в Расширенных настройках (стандарт 15).
+            // ИСПРАВЛЕНИЕ (по заданию): широкое окно поиска — это тоже
+            // перескок, поэтому оно работает ТОЛЬКО при включённой кнопке 🔀.
+            // При выключенных перескоках ищем строго рядом с курсором
+            // (до 3 слов вперёд, как в обычном движении) и назад не ищем —
+            // суфлёр идёт по порядку, как и обещает подсказка кнопки
+            pendingIndex = -1; pendingCount = 0
+            var found = -1
+            val fwdEnd = if (jumpEnabled) min(currentIndex + searchWindow, wordsNorm.size)
+                else min(currentIndex + 3, wordsNorm.size)
+            for (j in currentIndex until fwdEnd) {
+                if (wordMatch(wordsNorm[j], w)) { found = j; break }
+            }
             if (found < 0 && jumpEnabled) {
                 val backLimit = max(0, currentIndex - searchWindow)
-                j = currentIndex - 1
+                var j = min(currentIndex, wordsNorm.size) - 1
                 while (j >= backLimit) {
-                    var ok = true
-                    for (k in 0 until need) {
-                        if (j + k >= wordsNorm.size || !wordMatch(wordsNorm[j + k], seq[k])) { ok = false; break }
-                    }
-                    if (ok) { found = j; break }
+                    if (wordMatch(wordsNorm[j], w)) { found = j; break }
                     j--
                 }
             }
             if (found >= 0) {
-                // Цепочка слов текста найдена — это точно чтение.
-                // Пункт 4: если место впереди текущего — кусок между ними
-                // пропущен, помечаем его оттенком «пропущено»
-                if (found > currentIndex) skipRanges.add(Pair(currentIndex, found))
-                currentIndex = found + need
-                confirmNeeded = false; pendingIndex = -1; pendingCount = 0; missCount = 0
-                render()
+                pendingIndex = found + 1
+                pendingCount = 1
             } else {
                 missCount++
                 if (jumpEnabled && missCount >= 3) tryJump()
@@ -1671,15 +1640,9 @@ class MainActivity : AppCompatActivity() {
                             if (ev.hasError())
                                 toast("Ошибка записи видео (код " + ev.error + ")")
                             else {
-                                if (verticalOnly) {
-                                    // 9:16: режем вертикальный файл, широкий потом удалим
-                                    toast("Запись готова. Вырезаю вертикальный файл 9:16…")
-                                    makeShorts(ev.outputResults.outputUri, name, true)
-                                } else {
-                                    toast("Видео сохранено: галерея → Movies/VoicePrompter/" + name)
-                                    // Шортс: в режиме 16:9+9:16 вырезаем вертикальный файл
-                                    if (shortsMode) makeShorts(ev.outputResults.outputUri, name, false)
-                                }
+                                toast("Видео сохранено: галерея → Movies/VoicePrompter/" + name)
+                                // Шортс: в режиме 16:9+9:16 вырезаем вертикальный файл
+                                if (shortsMode) makeShorts(ev.outputResults.outputUri, name)
                             }
                         }
                     }
@@ -1704,12 +1667,6 @@ class MainActivity : AppCompatActivity() {
         btnAspect.background = btnBg(shortsMode)
     }
 
-    // Кнопка 9:16: зелёная — останется только вертикальный файл
-    private fun updateVerticalBtn() {
-        btnVertical.setTextColor(if (verticalOnly) Color.parseColor("#4CAF50") else Color.parseColor("#888888"))
-        btnVertical.background = btnBg(verticalOnly)
-    }
-
     // Рамка границ вертикального кадра: две жёлтые линии по центру экрана.
     // Ширина области = высота экрана * 9/16. Если экран сам вертикальный
     // (область шире экрана) — рамка не нужна и скрывается
@@ -1721,7 +1678,7 @@ class MainActivity : AppCompatActivity() {
             val w = root.width
             val h = root.height
             val frameW = (h * 9f / 16f).toInt()
-            if (!cameraOn || !(shortsMode || verticalOnly) || w <= 0 || h <= 0 || frameW >= w) {
+            if (!cameraOn || !shortsMode || w <= 0 || h <= 0 || frameW >= w) {
                 l.visibility = View.GONE
                 r.visibility = View.GONE
                 return@post
@@ -1742,11 +1699,8 @@ class MainActivity : AppCompatActivity() {
     // Вырезка шортса: из записанного файла берётся центральная полоса 9:16
     // и перекодируется библиотекой Media3 Transformer. Полностью ОФЛАЙН —
     // интернет не используется, всё считает процессор телефона
-    // deleteOriginal = true (режим 9:16): после успешной вырезки широкий
-    // оригинал удаляется из галереи — остаётся только вертикальный файл
-    private fun makeShorts(uri: Uri?, name: String, deleteOriginal: Boolean) {
+    private fun makeShorts(uri: Uri?, name: String) {
         if (uri == null) { toast("Шортс: не удалось найти записанный файл"); return }
-        val srcUri: Uri = uri
         try {
             val mmr = MediaMetadataRetriever()
             mmr.setDataSource(this, uri)
@@ -1770,10 +1724,6 @@ class MainActivity : AppCompatActivity() {
                     override fun onCompleted(composition: Composition, exportResult: ExportResult) {
                         transformer = null
                         saveShortsToGallery(tmp, outName)
-                        // 9:16: вертикальный файл готов — удаляем широкий оригинал
-                        if (deleteOriginal) {
-                            try { contentResolver.delete(srcUri, null, null) } catch (e: Exception) { }
-                        }
                     }
                     override fun onError(composition: Composition, exportResult: ExportResult,
                                          exportException: ExportException) {
