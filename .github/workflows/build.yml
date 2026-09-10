@@ -4,9 +4,21 @@ on:
   push:
   workflow_dispatch:
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VoicePrompter-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Publish direct APK download (Releases)
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk VoicePrompter.apk
+          gh release delete latest --yes || true
+          git push origin :refs/tags/latest || true
+          gh release create latest VoicePrompter.apk \
+            --title "VoicePrompter — последняя сборка" \
+            --notes "Скачайте VoicePrompter.apk и установите."
+        env:
+          GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
 
