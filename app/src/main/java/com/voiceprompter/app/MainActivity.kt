@@ -1874,6 +1874,29 @@ class MainActivity : AppCompatActivity() {
 
         box.addView(colors); box.addView(cb)
 
+        // Размер шрифта (возврат по заданию): ползунок 20..80 — те же
+        // пределы, что у кнопок A−/A+ на панели. Применяется сразу;
+        // сохраняется кнопкой «Готово» (prefs "font"), как и раньше
+        val fontLabel = TextView(this)
+        fontLabel.text = "Размер шрифта: " + fontSize.toInt()
+        fontLabel.textSize = 16f
+        val fontSb = SeekBar(this)
+        fontSb.max = 60
+        fontSb.progress = (fontSize - 20).toInt()
+        fontSb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(s: SeekBar?, v: Int, fromUser: Boolean) {
+                fontSize = (v + 20).toFloat()
+                fontLabel.text = "Размер шрифта: " + fontSize.toInt()
+                if (fromUser) {
+                    textView.textSize = fontSize
+                    textView.post { autoScroll() }
+                }
+            }
+            override fun onStartTrackingTouch(s: SeekBar?) {}
+            override fun onStopTrackingTouch(s: SeekBar?) {}
+        })
+        box.addView(fontLabel); box.addView(fontSb)
+
         // Настройка: номер активной строки от верха экрана (1..6, стандарт 3).
         // Применяется сразу — лента подъезжает к новому положению
         val lineLabel = TextView(this)
