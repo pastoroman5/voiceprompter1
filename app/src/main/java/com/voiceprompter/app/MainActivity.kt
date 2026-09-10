@@ -1148,10 +1148,19 @@ class MainActivity : AppCompatActivity() {
             // При выключенных перескоках ищем строго рядом с курсором
             // (до 3 слов вперёд, как в обычном движении) и назад не ищем —
             // суфлёр идёт по порядку, как и обещает подсказка кнопки
+            // ИСПРАВЛЕНИЕ (по заданию): при выключенных перескоках окно
+            // «3 слова вперёд» раньше отсчитывалось от ЗАМЕРШЕГО курсора.
+            // Если при возврате к тексту первые слова распознались неточно,
+            // цепочка подтверждения рвалась, чтец уходил дальше 3 слов —
+            // и суфлёр терял его насовсем. Теперь помним, докуда дошла
+            // последняя цепочка совпавших слов (lastChain), и ищем вперёд
+            // до «цепочка + 3». Движение по-прежнему строго вперёд и только
+            // после подтверждения — перескоков это не добавляет
+            val lastChain = pendingIndex
             pendingIndex = -1; pendingCount = 0
             var found = -1
             val fwdEnd = if (jumpEnabled) min(currentIndex + searchWindow, wordsNorm.size)
-                else min(currentIndex + 3, wordsNorm.size)
+                else min(max(currentIndex + 3, lastChain + 3), wordsNorm.size)
             for (j in currentIndex until fwdEnd) {
                 if (wordMatch(wordsNorm[j], w)) { found = j; break }
             }
